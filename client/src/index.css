@@ -18,6 +18,102 @@ body {
   text-align: center;
 }
 
-.connection strong {
+.game {
+  position: fixed;
+  inset: 0;
+  overflow: hidden;
+}
+
+.game canvas {
+  display: block;
+  touch-action: none;
+}
+
+.hud {
+  position: absolute;
+  top: 12px;
+  left: 16px;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgb(0 0 0 / 0.6);
+}
+
+.hud p {
+  margin: 0 0 4px;
+}
+
+.hud-hp {
+  font-size: 20px;
+}
+
+.hud-hp strong {
   font-variant-numeric: tabular-nums;
+}
+
+.hud-keys {
+  font-size: 13px;
+  opacity: 0.8;
+}
+
+.debug {
+  position: absolute;
+  top: 12px;
+  right: 12px;
+  width: 260px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: rgb(10 12 20 / 0.82);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.debug h2 {
+  margin: 0 0 6px;
+  font-size: 14px;
+}
+
+.debug dl {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 2px 10px;
+  margin: 0 0 8px;
+}
+
+.debug dt {
+  opacity: 0.7;
+}
+
+.debug dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+
+.debug-buttons {
+  display: flex;
+  gap: 6px;
+}
+
+.debug-buttons + .debug-buttons {
+  margin-top: 6px;
+}
+
+.debug-buttons button {
+  flex: 1;
+  padding: 4px 0;
+  border: 1px solid #4a5266;
+  border-radius: 6px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.debug-buttons button[aria-pressed='true'] {
+  border-color: #f2c14e;
+  background: rgb(242 193 78 / 0.18);
+}
+
+.debug-hint {
+  margin: 8px 0 0;
+  font-size: 12px;
+  opacity: 0.7;
 }
