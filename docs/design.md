@@ -137,7 +137,7 @@ fight-club/
 
 | 영역 | 선택 |
 |---|---|
-| 클라이언트 빌드 | Vite 8, React 19, TypeScript 7 (기존) |
+| 클라이언트 빌드 | Vite 8, React 19, TypeScript 6.0 (§14 변경 기록) |
 | 3D | three.js, @react-three/fiber v9, @react-three/drei |
 | UI 상태 | zustand |
 | 네트워크 | Colyseus 서버와 Colyseus JS SDK (구현 시점의 최신 안정 버전) |
@@ -473,7 +473,7 @@ sequenceDiagram
 | `buffered` · `flags` | uint8 · uint8 | 가끔 | 선입력, 비트 1 = 무적 |
 | `lastSeq` | uint32 | 30Hz | 서버가 처리한 이 플레이어의 마지막 입력 번호 |
 
-Schema 클래스는 데코레이터 대신 `defineTypes`로 정의한다. `erasableSyntaxOnly` 규칙, 그리고 데코레이터를 변환하지 않는 실행 도구와 충돌하지 않게 하기 위해서다 (S4에서 확인).
+Schema는 데코레이터나 클래스 없이 `schema({...})` + `t.*` 필드 빌더로 정의한다. Schema v5가 권장하는 방식이고(`defineTypes`는 deprecated), `erasableSyntaxOnly` 규칙과도 충돌하지 않는다 (S4에서 확인).
 
 **메시지**
 
@@ -837,3 +837,14 @@ flowchart LR
 1. 이 설계를 검토하고 승인한다. 특히 §2 핵심 결정과 §12 변경 계획.
 2. `/sc:workflow` — 스파이크(S4 → S1 → S2·S3)를 앞에 둔 구현 단계 계획을 세운다.
 3. `/sc:implement` — 계획대로 구현한다.
+
+---
+
+## 14. 변경 기록
+
+| 날짜 | 변경 | 이유 | 영향 |
+|---|---|---|---|
+| 2026-10-30 | TypeScript 7.0 → **6.0.3** | TS 7 패키지는 네이티브 컴파일러라 typescript-eslint가 쓰는 JS 컴파일러 API가 없다. 설치 단계에서 peer 충돌이 나고, 강제로 설치해도 린트가 실행 중에 실패한다 | typescript-eslint가 TS 7을 지원하면 다시 올린다 |
+| 2026-10-30 | **Colyseus 0.18 · Schema v5 · 클라이언트 SDK `@colyseus/sdk`** 적용 | 구현 시점의 최신 안정 버전 | 서버는 `defineServer`·`defineRoom`으로 정의하고, Schema는 `schema()` + `t.*`로 정의한다 (§5.8) |
+| 2026-10-30 | S4 결과: Room의 클래스 필드(`state = …`, `patchRate = …`)가 정상 동작함 | Colyseus가 `__init()`에서 클래스 필드로 생긴 인스턴스 속성을 접근자로 되돌린다 | 클래스 필드 선언 방식을 그대로 쓴다 |
+| 2026-10-30 | **검토 필요**: Colyseus 0.18 내장 넷코드 기능 확인 — 고정 스텝 루프(`setFixedTimestep`), 입력 버퍼(`defineInput`), 랙 보상(`allowRewindState`), 클라이언트 예측·보정(SDK `Reconciler`·`SimReconciler`), 지연 주입(`simulateLatency`), 메시지 제한·검증(`maxMessagesPerSecond`·`validate`) | 이 설계서가 직접 구현하기로 한 부분과 겹친다 | P1 착수 전에 §5.4~5.6, §6.2·6.3·6.7의 직접 구현 범위를 다시 정한다 |

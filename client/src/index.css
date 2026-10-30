@@ -1,0 +1,23 @@
+:root {
+  font-family: system-ui, -apple-system, 'Apple SD Gothic Neo', 'Malgun Gothic', sans-serif;
+  color-scheme: dark;
+  color: #e8e6f0;
+  background: #14121c;
+  font-synthesis: none;
+  -webkit-font-smoothing: antialiased;
+}
+
+body {
+  margin: 0;
+}
+
+.connection {
+  display: grid;
+  place-content: center;
+  min-height: 100svh;
+  text-align: center;
+}
+
+.connection strong {
+  font-variant-numeric: tabular-nums;
+}
