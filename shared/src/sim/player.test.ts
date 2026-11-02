@@ -3,7 +3,7 @@ import { Action, Btn } from '../actions.ts'
 import { ATTACKS } from '../attacks.ts'
 import { ARENA_HALF, FALL_OUT_Y, GRAVITY, JUMP_SPEED, RUN_SPEED, TICK_RATE, WALK_SPEED } from '../constants.ts'
 import { makePlayer } from './fixtures.ts'
-import { IDLE_INPUT, stepPlayer, type HitQuery, type InputLike, type PlayerSim } from './player.ts'
+import { IDLE_INPUT, stepPlayer, type InputLike, type PlayerSim, type StepEvent } from './player.ts'
 
 const DT = 1 / TICK_RATE
 const RIGHT: InputLike = { mx: 127, mz: 0, held: 0, pressed: 0 }
@@ -25,8 +25,8 @@ describe('stepPlayer 이동', () => {
     })
     const a = makePlayer()
     const b = makePlayer()
-    const queriesA: (HitQuery | null)[] = []
-    const queriesB: (HitQuery | null)[] = []
+    const queriesA: (StepEvent | null)[] = []
+    const queriesB: (StepEvent | null)[] = []
     for (let i = 0; i < 600; i++) {
       queriesA.push(stepPlayer(a, script(i), DT))
       queriesB.push(stepPlayer(b, script(i), DT))
@@ -128,17 +128,17 @@ describe('stepPlayer 잽', () => {
     queries.push(stepPlayer(p, IDLE_INPUT, DT))
     expect(p.action).toBe(Action.Idle)
     expect(queries.flatMap((q, i) => (q ? [i] : []))).toEqual([5, 6, 7])
-    expect(queries[5]?.first).toBe(true)
-    expect(queries[6]?.first).toBe(false)
+    expect(queries[5]).toMatchObject({ kind: 'hit', first: true })
+    expect(queries[6]).toMatchObject({ kind: 'hit', first: false })
   })
 
   it('판정은 바라보는 방향 앞, 펀치 높이에 생긴다', () => {
     const p = makePlayer({ fx: 1, fz: 0 })
     stepPlayer(p, press(Btn.PunchL), DT)
-    let query: HitQuery | null = null
+    let query: StepEvent | null = null
     for (let i = 0; i < 5; i++) query = stepPlayer(p, IDLE_INPUT, DT)
     expect(query).toEqual({
-      attack: 'jab', first: true,
+      kind: 'hit', attack: 'jab', first: true,
       x: ATTACKS.jab.reach, y: ATTACKS.jab.height, z: 0, r: ATTACKS.jab.radius,
     })
   })

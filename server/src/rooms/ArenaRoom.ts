@@ -1,8 +1,11 @@
-import { Room, type Client, type Rewind, type StepContext } from '@colyseus/core'
+import { Room, type Client, type Rewind, type RewindView, type StepContext } from '@colyseus/core'
 import {
-  ALL_BUTTONS, ATTACKS, Action, ArenaState, FALL_OUT_Y, IDLE_INPUT, MAX_HP, MAX_REWIND_MS, Msg, PATCH_RATE,
-  PlayerInput, PlayerState, TICK_RATE, applyHit, hitsBody, stepPlayer,
-  type DevDummyCommand, type HitEvent, type HitQuery, type InputLike,
+  AFK_FRAMES, ALL_BUTTONS, ARENA_HALF, ATTACKS, Action, ArenaState, BODY_RADIUS, COMBO_KNOCKDOWN_HITS,
+  COMBO_WINDOW_FRAMES, CloseCode, FALL_OUT_Y, IDLE_INPUT, KO_FRAMES, MAX_HP, MAX_REWIND_MS, Msg, OUT_OF_BOUNDS,
+  PATCH_RATE, PlayerInput, PlayerState, RINGOUT_CREDIT_FRAMES, SPAWN_INVULN_FRAMES, TICK_RATE,
+  applyHit, applyThrow, hitsBody, isGrabbable, isGuarding, isHittable, stepPlayer,
+  type AttackId, type Body, type DevDummyCommand, type ElimCause, type ElimEvent, type HitEvent, type InputLike,
+  type ResultMsg, type StrikeId,
 } from '@fight-club/shared'
 
 /**
@@ -14,8 +17,12 @@ const INPUT_CREDIT_CAP = 8
 /** 이 틱 수만큼 입력이 없으면 서버가 빈 입력으로 진행한다 (100ms) — design §6.3 */
 const IDLE_AFTER_TICKS = 6
 
-/** 스폰 영역 반경 (m). 가장자리에서 떨어진 안쪽 — design §6.4 */
+/** 스폰: 가장자리에서 떨어진 안쪽 영역에서 후보를 뽑아 다른 플레이어와 가장 먼 곳에 세운다 — design §6.4 */
 const SPAWN_HALF = 8
+const SPAWN_CANDIDATES = 12
+
+/** 잡힌 쪽을 붙여 두는 거리 — 몸끼리 맞닿는 거리라 서로 밀어내지 않는다 */
+const GRAB_GAP = BODY_RADIUS * 2
 
 /** 개발용 샌드백: 요청한 플레이어 앞 거리, 집 위치 범위(왕복해도 경기장 안), 왕복 반경 (m) */
 const DUMMY_DISTANCE = 2.5
@@ -26,12 +33,21 @@ interface Pacing {
   credit: number
   /** 입력 없이 지나간 틱 수 */
   silent: number
+  /** 마지막으로 의미 있는 입력을 한 틱 (자리 비움 판정) */
+  lastActive: number
 }
 
 interface PendingHit {
   attacker: string
   victim: string
-  query: HitQuery
+  attack: AttackId
+  /** 공격자가 보던 시점에 정면 가드 중이었다 */
+  guardedAtView: boolean
+}
+
+interface PendingGrab {
+  holder: string
+  target: string
 }
 
 /** 개발용 샌드백 — P5의 봇이 들어오기 전, 혼자서도 때려 볼 대상 */
@@ -54,6 +70,11 @@ export function notifyAllArenas(type: string, message: unknown) {
 }
 
 export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
+  /** 자리 비움으로 퇴장시키는 무입력 시간 (프레임). 테스트에서 줄일 수 있다 */
+  static afkFrames = AFK_FRAMES
+  /** 탈락자에게 결과를 보낸 뒤 연결을 끊기까지 기다리는 시간 (ms). 개발용 지연 주입 중에만 쓴다 (app.ts가 정한다) */
+  static closeDelayMs = 0
+
   state = new ArenaState()
   patchRate = 1000 / PATCH_RATE
   inputs = this.defineInput(PlayerInput, {
@@ -63,8 +84,18 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
 
   private rewind!: Rewind
   private pacing = new Map<string, Pacing>()
+  private joinedAt = new Map<string, number>()
   /** 공격자별로 이번 공격에 이미 맞은 대상 — 한 번의 공격은 같은 상대를 한 번만 맞힌다 */
   private struck = new Map<string, Set<string>>()
+  /** 잡은 쪽 → 잡힌 쪽 */
+  private grabs = new Map<string, string>()
+  /** 연속 피격 수 — design §4.6 */
+  private combos = new Map<string, { count: number; lastTick: number }>()
+  /** 마지막으로 때린 사람 — 낙사 킬 인정 */
+  private lastHitBy = new Map<string, { attacker: string; tick: number }>()
+  private pendingHits: PendingHit[] = []
+  private pendingGrabs: PendingGrab[] = []
+  private pendingThrows: string[] = []
   private dummies = new Map<string, Dummy>()
   private dummySeq = 0
   private readonly dummyInput: InputLike = { mx: 0, mz: 0, held: 0, pressed: 0 }
@@ -73,6 +104,8 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     arenas.add(this)
     this.rewind = this.allowRewindState({ maxRewindMs: MAX_REWIND_MS })
     this.rewind.attachAll(this.state.players, { fields: ['x', 'y', 'z'] })
+    // 가드 판정은 공격자가 보던 시점의 동작·방향도 본다. 이어지는 값이 아니므로 보간하지 않는다
+    this.rewind.attachAll(this.state.players, { fields: ['action', 'fx', 'fz'], interpolate: 'step' })
     this.setFixedTimestep((ctx) => this.update(ctx), TICK_RATE)
 
     if (process.env.NODE_ENV !== 'production') {
@@ -82,9 +115,12 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
 
   onJoin(client: Client) {
     const player = new PlayerState()
-    respawn(player)
+    const spot = this.spawnPoint()
+    resetAt(player, spot.x, spot.z, 0, 1)
+    player.invuln = SPAWN_INVULN_FRAMES
     this.state.players.set(client.sessionId, player)
-    this.pacing.set(client.sessionId, { credit: 0, silent: 0 })
+    this.pacing.set(client.sessionId, { credit: 0, silent: 0, lastActive: this.state.tick })
+    this.joinedAt.set(client.sessionId, this.clock.elapsedTime)
   }
 
   onLeave(client: Client) {
@@ -97,7 +133,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
 
   private update(ctx: StepContext) {
     this.state.tick = ctx.tick
-    const hits: PendingHit[] = []
+    this.pendingHits.length = 0
+    this.pendingGrabs.length = 0
+    this.pendingThrows.length = 0
 
     for (const [id, player] of this.state.players) {
       const pace = this.pacing.get(id)
@@ -110,67 +148,247 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
         if (!input) break
         pace.credit--
         stepped = true
-        this.advancePlayer(id, player, input, ctx.dt, true, hits)
+        if (input.mx || input.mz || input.held || input.pressed) pace.lastActive = ctx.tick
+        this.advance(id, player, input, ctx.dt, true)
       }
       if (stepped) {
         pace.silent = 0
       } else if (++pace.silent >= IDLE_AFTER_TICKS) {
         // 입력이 오래 끊기면 빈 입력으로 진행한다 — 입력을 끊어 공중에 멈추는 악용 방지
-        this.advancePlayer(id, player, IDLE_INPUT, ctx.dt, false, hits)
+        this.advance(id, player, IDLE_INPUT, ctx.dt, false)
       }
     }
 
     for (const [id, dummy] of this.dummies) {
       const player = this.state.players.get(id)
-      if (player) this.advancePlayer(id, player, this.steerDummy(player, dummy), ctx.dt, false, hits)
+      if (player) this.advance(id, player, this.steerDummy(player, dummy), ctx.dt, false)
     }
 
     // 모두 움직인 뒤 한꺼번에 적용해야 처리 순서와 상관없이 서로 동시에 맞힐 수 있다
-    for (const hit of hits) this.resolveHit(hit)
-
-    for (const [id, player] of this.state.players) {
-      if (player.y >= FALL_OUT_Y && player.hp > 0) continue
-      // P1 임시 규칙: 탈락 대신 다시 시작한다 (탈락 흐름은 P2-7). 샌드백은 제자리로 돌아온다
-      const dummy = this.dummies.get(id)
-      if (dummy) placeDummy(player, dummy)
-      else respawn(player)
-    }
+    for (const hit of this.pendingHits) this.resolveHit(hit)
+    this.resolveGrabs()
+    for (const holder of this.pendingThrows) this.resolveThrow(holder)
+    this.holdGrabs()
+    this.checkEliminations()
   }
 
-  private advancePlayer(id: string, player: PlayerState, input: InputLike, dt: number, lagComp: boolean, hits: PendingHit[]) {
-    const query = stepPlayer(player, input, dt, this.state.players.values())
-    if (!query) return
+  /** 한 스텝 진행하고, 공격·잡기 판정은 공격자가 보던 시점으로 되감아 검사해 모아 둔다 */
+  private advance(id: string, player: PlayerState, input: InputLike, dt: number, lagComp: boolean) {
+    const event = stepPlayer(player, input, dt, {
+      bodies: this.state.players.values(),
+      aimTargets: () => this.seenBodies(id, lagComp),
+    })
+    if (!event) return
+    if (event.kind === 'throw') {
+      this.pendingThrows.push(id)
+      return
+    }
 
-    if (query.first) this.struck.set(id, new Set())
+    if (event.first) this.struck.set(id, new Set())
     const struck = this.struck.get(id) ?? new Set<string>()
-    // 공격자가 보고 있던 시점으로 되감아 판정한다. 빈 입력에는 시점 정보가 없으므로 현재 위치를 쓴다
-    const seen = lagComp ? this.rewind.lastSeenBy(id) : this.rewind.at(0)
+    const seen = this.view(id, lagComp)
+    let grabTarget: string | undefined
+    let grabDistance = Infinity
     for (const [targetId, target] of this.state.players) {
       if (targetId === id || struck.has(targetId)) continue
-      if (hitsBody(query, seen.value(target, 'x'), seen.value(target, 'y'), seen.value(target, 'z'))) {
+      const x = seen.value(target, 'x')
+      const z = seen.value(target, 'z')
+      if (!hitsBody(event, x, seen.value(target, 'y'), z)) continue
+      if (event.kind === 'hit') {
         struck.add(targetId)
-        hits.push({ attacker: id, victim: targetId, query })
+        const pose = { x, z, fx: seen.value(target, 'fx'), fz: seen.value(target, 'fz'), action: seen.value(target, 'action') }
+        this.pendingHits.push({ attacker: id, victim: targetId, attack: event.attack, guardedAtView: isGuarding(pose, player.x, player.z) })
+      } else {
+        // 잡기는 판정 안의 가장 가까운 한 명만
+        const distance = (x - player.x) ** 2 + (z - player.z) ** 2
+        if (distance < grabDistance) {
+          grabDistance = distance
+          grabTarget = targetId
+        }
       }
+    }
+    if (grabTarget) {
+      struck.add(grabTarget)
+      this.pendingGrabs.push({ holder: id, target: grabTarget })
     }
   }
 
-  private resolveHit({ attacker, victim, query }: PendingHit) {
+  /** 공격자가 보던 시점의 세계 (빈 입력·샌드백은 시점 정보가 없으므로 현재) */
+  private view(id: string, lagComp: boolean): RewindView {
+    return lagComp ? this.rewind.lastSeenBy(id) : this.rewind.at(0)
+  }
+
+  /** 조준 보정 대상: 공격자가 보던 시점의 맞을 수 있는 상대 위치 */
+  private seenBodies(id: string, lagComp: boolean): Body[] {
+    const seen = this.view(id, lagComp)
+    const bodies: Body[] = []
+    for (const [otherId, other] of this.state.players) {
+      if (otherId === id || !isHittable(other)) continue
+      bodies.push({ x: seen.value(other, 'x'), y: seen.value(other, 'y'), z: seen.value(other, 'z') })
+    }
+    return bodies
+  }
+
+  private resolveHit({ attacker, victim, attack, guardedAtView }: PendingHit) {
     const from = this.state.players.get(attacker)
     const target = this.state.players.get(victim)
-    if (!from || !target) return
-    const attack = ATTACKS[query.attack]
-    applyHit(target, from, attack)
-    const event: HitEvent = {
-      tick: this.state.tick, attacker, victim, attack: query.attack, damage: attack.damage, hp: target.hp,
+    if (!from || !target || !isHittable(target)) return
+    // 공격자가 보던 시점과 지금 중 한 번이라도 정면 가드였으면 막은 것으로 친다 (방어자 우대) — design §5.6
+    const guarded = guardedAtView || isGuarding(target, from.x, from.z)
+    const knockdown = !guarded && this.countCombo(victim) >= COMBO_KNOCKDOWN_HITS
+    const damage = applyHit(target, from, ATTACKS[attack], { guarded, knockdown })
+    if (knockdown) this.combos.delete(victim)
+    this.lastHitBy.set(victim, { attacker, tick: this.state.tick })
+    this.broadcastHit(attacker, victim, attack, guarded, damage, target.hp)
+  }
+
+  /** 마지막 피격 후 1.5초 안에 다시 맞으면 연속 피격 수가 늘어난다 */
+  private countCombo(id: string): number {
+    const tick = this.state.tick
+    const combo = this.combos.get(id)
+    const count = combo && tick - combo.lastTick <= COMBO_WINDOW_FRAMES ? combo.count + 1 : 1
+    this.combos.set(id, { count, lastTick: tick })
+    return count
+  }
+
+  private resolveGrabs() {
+    for (const { holder, target } of this.pendingGrabs) {
+      // 서로 동시에 잡으면 둘 다 헛잡기
+      if (this.pendingGrabs.some((g) => g.holder === target && g.target === holder)) continue
+      const a = this.state.players.get(holder)
+      const b = this.state.players.get(target)
+      // 잡는 동작 중에 맞았으면 잡기는 끊긴다. 가드 중인 상대는 잡힌다
+      if (!a || !b || a.action !== Action.GrabTry || !isGrabbable(b) || this.inGrab(target)) continue
+      setAction(a, Action.Holding)
+      setAction(b, Action.Grabbed)
+      a.vx = a.vz = b.vx = b.vz = 0
+      this.grabs.set(holder, target)
+      this.attach(a, b)
     }
+  }
+
+  private resolveThrow(holderId: string) {
+    const targetId = this.grabs.get(holderId)
+    this.grabs.delete(holderId)
+    const holder = this.state.players.get(holderId)
+    const target = targetId ? this.state.players.get(targetId) : undefined
+    if (!holder || !targetId || !target || target.action !== Action.Grabbed) return
+    const damage = applyThrow(target, holder)
+    this.combos.delete(targetId)
+    this.lastHitBy.set(targetId, { attacker: holderId, tick: this.state.tick })
+    this.broadcastHit(holderId, targetId, 'throw', false, damage, target.hp)
+  }
+
+  /** 잡힌 쪽을 잡은 쪽 앞에 붙여 둔다. 어느 한쪽이 맞거나 사라지면 잡기가 풀린다 */
+  private holdGrabs() {
+    for (const [holderId, targetId] of this.grabs) {
+      const holder = this.state.players.get(holderId)
+      const target = this.state.players.get(targetId)
+      const holding = holder?.action === Action.Holding || holder?.action === Action.Throwing
+      const held = target?.action === Action.Grabbed
+      if (holder && target && holding && held) {
+        this.attach(holder, target)
+        continue
+      }
+      this.grabs.delete(holderId)
+      if (target && held) setAction(target, Action.Idle)
+      if (holder?.action === Action.Holding) setAction(holder, Action.Idle)
+    }
+  }
+
+  private attach(holder: PlayerState, target: PlayerState) {
+    // 잡힌 쪽은 경기장 위에 둔다 — 떨어뜨리는 건 던지기의 몫
+    target.x = Math.max(-ARENA_HALF, Math.min(ARENA_HALF, holder.x + holder.fx * GRAB_GAP))
+    target.z = Math.max(-ARENA_HALF, Math.min(ARENA_HALF, holder.z + holder.fz * GRAB_GAP))
+    target.y = holder.y
+  }
+
+  private inGrab(id: string): boolean {
+    if (this.grabs.has(id)) return true
+    for (const grabbed of this.grabs.values()) if (grabbed === id) return true
+    return false
+  }
+
+  /** KO·낙사·자리 비움 — 샌드백은 탈락 대신 제자리로 돌아온다 — design §4.9 */
+  private checkEliminations() {
+    const tick = this.state.tick
+    const out: [string, ElimCause, string | undefined][] = []
+    for (const [id, p] of this.state.players) {
+      const fell = p.y < FALL_OUT_Y || Math.abs(p.x) > OUT_OF_BOUNDS || Math.abs(p.z) > OUT_OF_BOUNDS
+      const knockedOut = p.action === Action.KO && (p.actionFrame >= KO_FRAMES || fell)
+      const dummy = this.dummies.get(id)
+      if (dummy) {
+        if (fell || knockedOut) placeDummy(p, dummy)
+      } else if (knockedOut) {
+        out.push([id, 'ko', this.lastHitBy.get(id)?.attacker])
+      } else if (fell && p.action !== Action.KO) {
+        const last = this.lastHitBy.get(id)
+        const credited = last && tick - last.tick <= RINGOUT_CREDIT_FRAMES ? last.attacker : undefined
+        out.push([id, credited ? 'ringout' : 'selfout', credited])
+      } else if (tick - (this.pacing.get(id)?.lastActive ?? tick) >= ArenaRoom.afkFrames) {
+        out.push([id, 'afk', undefined])
+      }
+    }
+    for (const [id, cause, killer] of out) this.eliminate(id, cause, killer)
+  }
+
+  /** 모두에게 알리고, 본인에게 결과를 보낸 뒤 연결을 끊는다 */
+  private eliminate(id: string, cause: ElimCause, killer?: string) {
+    const player = this.state.players.get(id)
+    if (!player) return
+    const killerState = killer ? this.state.players.get(killer) : undefined
+    if (killerState) killerState.kills++
+
+    const credit = killer ? { killer } : {}
+    const event: ElimEvent = { tick: this.state.tick, victim: id, cause, ...credit }
+    this.broadcast(Msg.Elim, event)
+    const client = this.clients.getById(id)
+    if (client) {
+      const result: ResultMsg = {
+        survivalMs: Math.round(this.clock.elapsedTime - (this.joinedAt.get(id) ?? this.clock.elapsedTime)),
+        kills: player.kills,
+        cause,
+        ...credit,
+      }
+      client.send(Msg.Result, result)
+      const close = () => client.leave(CloseCode.Eliminated)
+      if (ArenaRoom.closeDelayMs > 0) this.clock.setTimeout(close, ArenaRoom.closeDelayMs)
+      else close()
+    }
+    this.removePlayer(id)
+  }
+
+  private broadcastHit(attacker: string, victim: string, attack: StrikeId, guarded: boolean, damage: number, hp: number) {
+    const event: HitEvent = { tick: this.state.tick, attacker, victim, attack, guarded, damage, hp }
     this.broadcast(Msg.Hit, event)
   }
 
+  /** 잡기에 얽혀 있던 상대는 다음 틱의 holdGrabs가 풀어 준다 */
   private removePlayer(id: string) {
     this.state.players.delete(id)
     this.pacing.delete(id)
+    this.joinedAt.delete(id)
     this.struck.delete(id)
+    this.combos.delete(id)
+    this.lastHitBy.delete(id)
     this.dummies.delete(id)
+  }
+
+  /** 안쪽 영역의 후보 중 다른 플레이어와의 최소 거리가 가장 큰 곳 — design §6.4 */
+  private spawnPoint() {
+    let best = { x: 0, z: 0 }
+    let bestGap = -1
+    for (let i = 0; i < SPAWN_CANDIDATES; i++) {
+      const x = (Math.random() * 2 - 1) * SPAWN_HALF
+      const z = (Math.random() * 2 - 1) * SPAWN_HALF
+      let gap = Infinity
+      for (const other of this.state.players.values()) gap = Math.min(gap, Math.hypot(other.x - x, other.z - z))
+      if (gap > bestGap) {
+        bestGap = gap
+        best = { x, z }
+      }
+    }
+    return best
   }
 
   /** 개발용: 요청한 플레이어 앞에 샌드백을 세우거나 모두 치운다 */
@@ -218,6 +436,13 @@ function clamp(value: number, limit: number) {
   return Math.max(-limit, Math.min(limit, value))
 }
 
+function setAction(p: PlayerState, action: number) {
+  p.action = action
+  p.actionFrame = 0
+  p.stun = 0
+  p.buffered = 0
+}
+
 function resetAt(p: PlayerState, x: number, z: number, fx: number, fz: number) {
   p.x = x
   p.y = 0
@@ -227,14 +452,9 @@ function resetAt(p: PlayerState, x: number, z: number, fx: number, fz: number) {
   p.vz = 0
   p.fx = fx
   p.fz = fz
-  p.action = Action.Idle
-  p.actionFrame = 0
-  p.stun = 0
+  setAction(p, Action.Idle)
+  p.invuln = 0
   p.hp = MAX_HP
-}
-
-function respawn(p: PlayerState) {
-  resetAt(p, (Math.random() * 2 - 1) * SPAWN_HALF, (Math.random() * 2 - 1) * SPAWN_HALF, 0, 1)
 }
 
 function placeDummy(p: PlayerState, dummy: Dummy) {

@@ -5,7 +5,7 @@ import type { PlayerSim } from './player.ts'
 export function makePlayer(overrides: Partial<PlayerSim> = {}): PlayerSim {
   return {
     x: 0, y: 0, z: 0, vx: 0, vy: 0, vz: 0, fx: 0, fz: 1,
-    action: Action.Idle, actionFrame: 0, stun: 0,
+    action: Action.Idle, actionFrame: 0, stun: 0, buffered: 0, invuln: 0,
     ...overrides,
   }
 }

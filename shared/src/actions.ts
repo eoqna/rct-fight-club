@@ -5,7 +5,22 @@ export const Action = {
   Run: 2,
   Air: 3,
   Jab: 10,
+  Straight: 11,
+  Kick: 12,
+  Dash: 13,
+  FlyingKick: 14,
+  /** 날아차기 착지 후딜 */
+  Landing: 15,
+  Guard: 20,
+  GuardStun: 21,
+  GrabTry: 30,
+  Holding: 31,
+  Throwing: 32,
+  Grabbed: 33,
+  Thrown: 34,
   Hitstun: 40,
+  Knockdown: 41,
+  KO: 60,
   Falling: 61,
 } as const
 

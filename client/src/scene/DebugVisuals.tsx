@@ -1,12 +1,15 @@
 import { useFrame } from '@react-three/fiber'
 import { useRef } from 'react'
-import type { Group, Mesh } from 'three'
+import { Color, type Group, type Mesh, type MeshBasicMaterial } from 'three'
 import { BODY_HEIGHT, BODY_RADIUS } from '@fight-club/shared'
 import { createPose, type GameSession } from '../game/session.ts'
 
+const HIT_COLOR = new Color('#ff4d6d')
+const GRAB_COLOR = new Color('#b98cff')
+
 const pose = createPose()
 
-/** 디버그: 서버가 본 내 위치(초록 상자)와 내 잽 판정(빨간 구) */
+/** 디버그: 서버가 본 내 위치(초록 상자)와 내 공격 판정(빨간 구)·잡기 판정(보라 구) */
 export function DebugVisuals({ session }: { session: GameSession }) {
   const ghost = useRef<Group>(null)
   const hitbox = useRef<Mesh>(null)
@@ -22,6 +25,7 @@ export function DebugVisuals({ session }: { session: GameSession }) {
     if (box) {
       hitbox.current.position.set(box.x, box.y, box.z)
       hitbox.current.scale.setScalar(box.r)
+      ;(hitbox.current.material as MeshBasicMaterial).color.copy(box.kind === 'grab' ? GRAB_COLOR : HIT_COLOR)
     }
   })
 
@@ -35,7 +39,7 @@ export function DebugVisuals({ session }: { session: GameSession }) {
       </group>
       <mesh ref={hitbox} visible={false}>
         <sphereGeometry args={[1, 16, 12]} />
-        <meshBasicMaterial color="#ff4d6d" transparent opacity={0.35} depthWrite={false} />
+        <meshBasicMaterial color={HIT_COLOR} transparent opacity={0.35} depthWrite={false} />
       </mesh>
     </>
   )

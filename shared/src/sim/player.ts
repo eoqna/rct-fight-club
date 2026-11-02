@@ -1,8 +1,8 @@
 import { Action, Btn } from '../actions.ts'
-import { ATTACKS, type AttackId } from '../attacks.ts'
+import { ATTACKS, DASH_DISTANCE, GRAB, THROW, type AttackId } from '../attacks.ts'
 import {
-  AIR_ACCEL, ARENA_HALF, BODY_HEIGHT, BODY_RADIUS, GRAVITY, JUMP_SPEED, KNOCKBACK_DECEL, MOVE_ACCEL, RUN_SPEED,
-  WALK_SPEED,
+  AIM_ASSIST_COS, AIM_ASSIST_RANGE, AIR_ACCEL, ARENA_HALF, BODY_HEIGHT, BODY_RADIUS, GETUP_INVULN_FRAMES, GRAVITY,
+  INPUT_BUFFER_FRAMES, JUMP_SPEED, KNOCKBACK_DECEL, KNOCKDOWN_FRAMES, MOVE_ACCEL, RUN_SPEED, WALK_SPEED,
 } from '../constants.ts'
 
 /** stepPlayer가 다루는 상태. 서버의 PlayerState와 클라이언트 예측 미러가 모두 이 모양이다 */
@@ -19,8 +19,12 @@ export interface PlayerSim {
   action: number
   /** 현재 동작의 경과 프레임 */
   actionFrame: number
-  /** 피격 경직 길이 (프레임) */
+  /** 경직 길이 (프레임) */
   stun: number
+  /** 선입력된 다음 동작 (0 = 없음) */
+  buffered: number
+  /** 남은 무적 프레임 */
+  invuln: number
 }
 
 /** 한 스텝의 입력. 이동은 -127..127, 화면 기준 → 가 +x, ↓ 가 +z */
@@ -40,11 +44,16 @@ export interface Body {
   z: number
 }
 
-/** 두 몸 중심 사이의 최소 거리 */
-const BODY_GAP = BODY_RADIUS * 2
+export interface StepEnv {
+  /** 부딪힐 다른 몸들. p 자신이 섞여 있어도 된다 (같은 객체는 건너뛴다) */
+  bodies?: Iterable<Body>
+  /** 조준 보정에 쓸 상대 위치. 공격·잡기를 시작하는 스텝에서만 부른다 */
+  aimTargets?: () => Iterable<Body>
+}
 
-/** 판정 프레임마다 반환되는 질의. 서버가 랙 보상으로 판정한다 — design §4.12 */
+/** 공격 판정 프레임마다 나온다. 서버가 랙 보상으로 판정한다 — design §4.12 */
 export interface HitQuery {
+  kind: 'hit'
   attack: AttackId
   /** 이번 공격의 첫 판정 프레임 — 대상당 1회 명중 기록을 새로 시작하는 시점 */
   first: boolean
@@ -54,7 +63,37 @@ export interface HitQuery {
   r: number
 }
 
-const ATTACK_OF: Partial<Record<number, AttackId>> = { [Action.Jab]: 'jab' }
+/** 잡기 판정 프레임마다 나온다 */
+export interface GrabQuery {
+  kind: 'grab'
+  first: boolean
+  x: number
+  y: number
+  z: number
+  r: number
+}
+
+/** 던지는 동작에서 상대를 놓는 순간 */
+export interface ThrowRelease {
+  kind: 'throw'
+}
+
+export type StepEvent = HitQuery | GrabQuery | ThrowRelease
+
+/** 두 몸 중심 사이의 최소 거리 */
+const BODY_GAP = BODY_RADIUS * 2
+
+const ATTACK_OF: Partial<Record<number, AttackId>> = {
+  [Action.Jab]: 'jab',
+  [Action.Straight]: 'straight',
+  [Action.Kick]: 'kick',
+  [Action.Dash]: 'dash',
+  [Action.FlyingKick]: 'flyingKick',
+}
+
+export function attackOf(action: number): AttackId | undefined {
+  return ATTACK_OF[action]
+}
 
 export function isInsideArena(x: number, z: number): boolean {
   return Math.abs(x) <= ARENA_HALF && Math.abs(z) <= ARENA_HALF
@@ -64,37 +103,121 @@ export function isInsideArena(x: number, z: number): boolean {
  * 플레이어를 고정 스텝 하나만큼 진행한다. 클라이언트 예측과 서버가 같은 함수를 부르므로
  * 사칙연산과 Math.sqrt만 쓴다 (엔진 간 결과 동일) — design §4.10
  *
- * bodies: 부딪힐 다른 몸들. p 자신이 섞여 있어도 된다 (같은 객체는 건너뛴다)
+ * 다른 플레이어에게 미치는 효과(명중·잡기·던지기)는 이벤트로 돌려주고 서버가 적용한다.
  */
-export function stepPlayer(p: PlayerSim, input: InputLike, dt: number, bodies?: Iterable<Body>): HitQuery | null {
+export function stepPlayer(p: PlayerSim, input: InputLike, dt: number, env: StepEnv = {}): StepEvent | null {
   const grounded = p.y === 0 && isInsideArena(p.x, p.z)
-  const attack = ATTACK_OF[p.action]
+  if (p.invuln > 0) p.invuln--
+  let event: StepEvent | null = null
 
-  if (attack !== undefined) {
-    const { startup, active, recovery } = ATTACKS[attack]
-    p.actionFrame++
-    if (p.actionFrame >= startup + active + recovery) finishAction(p, grounded)
-    if (grounded) approach(p, 0, 0, MOVE_ACCEL * dt)
-  } else if (p.action === Action.Hitstun) {
-    p.actionFrame++
-    if (p.actionFrame >= p.stun) finishAction(p, grounded)
-    if (grounded) approach(p, 0, 0, KNOCKBACK_DECEL * dt)
-  } else if (p.action !== Action.Falling) {
-    control(p, input, grounded, dt)
+  switch (p.action) {
+    case Action.Jab:
+    case Action.Straight:
+    case Action.Kick:
+    case Action.Dash:
+      stepAttack(p, input, grounded, dt, env)
+      break
+    case Action.FlyingKick:
+      // 공중에서 내지른 방향 그대로 날아간다. 착지는 integrate가 처리한다
+      p.actionFrame++
+      break
+    case Action.Landing:
+      p.actionFrame++
+      bufferAction(p, input, ATTACKS.flyingKick.recovery - p.actionFrame)
+      if (grounded) approach(p, 0, 0, MOVE_ACCEL * dt)
+      if (p.actionFrame >= ATTACKS.flyingKick.recovery) finish(p, grounded, dt, env)
+      break
+    case Action.Guard:
+      if (grounded && input.held & Btn.Guard) {
+        p.actionFrame++
+        approach(p, 0, 0, MOVE_ACCEL * dt)
+      } else {
+        p.action = grounded ? Action.Idle : Action.Air
+        p.actionFrame = 0
+        control(p, input, grounded, dt, env)
+      }
+      break
+    case Action.GuardStun:
+      p.actionFrame++
+      if (grounded) approach(p, 0, 0, KNOCKBACK_DECEL * dt)
+      if (p.actionFrame >= p.stun) {
+        p.action = grounded && input.held & Btn.Guard ? Action.Guard : Action.Idle
+        p.actionFrame = 0
+        p.stun = 0
+      }
+      break
+    case Action.GrabTry:
+      p.actionFrame++
+      bufferAction(p, input, GRAB.startup + GRAB.active + GRAB.recovery - p.actionFrame)
+      if (grounded) approach(p, 0, 0, MOVE_ACCEL * dt)
+      if (p.actionFrame >= GRAB.startup + GRAB.active + GRAB.recovery) finish(p, grounded, dt, env)
+      break
+    case Action.Holding: {
+      p.actionFrame++
+      approach(p, 0, 0, MOVE_ACCEL * dt)
+      // 방향을 고르면 그쪽으로, 시간이 지나면 바라보는 쪽으로 던진다
+      const len = Math.sqrt(input.mx * input.mx + input.mz * input.mz)
+      if (len > 0) {
+        p.fx = input.mx / len
+        p.fz = input.mz / len
+      }
+      if (len > 0 || p.actionFrame >= GRAB.holdFrames) {
+        p.action = Action.Throwing
+        p.actionFrame = 0
+      }
+      break
+    }
+    case Action.Throwing:
+      p.actionFrame++
+      approach(p, 0, 0, MOVE_ACCEL * dt)
+      if (p.actionFrame === THROW.release) event = { kind: 'throw' }
+      if (p.actionFrame >= THROW.release + THROW.recovery) finish(p, grounded, dt, env)
+      break
+    case Action.Grabbed:
+      // 위치는 서버가 잡은 쪽 앞에 붙여 둔다
+      p.actionFrame++
+      p.vx = 0
+      p.vz = 0
+      break
+    case Action.Thrown:
+      p.actionFrame++
+      if (grounded) approach(p, 0, 0, KNOCKBACK_DECEL * dt)
+      if (p.actionFrame >= p.stun) {
+        p.action = Action.Knockdown
+        p.actionFrame = 0
+        p.stun = 0
+      }
+      break
+    case Action.Hitstun:
+      p.actionFrame++
+      if (grounded) approach(p, 0, 0, KNOCKBACK_DECEL * dt)
+      if (p.actionFrame >= p.stun) finish(p, grounded, dt, env)
+      break
+    case Action.Knockdown:
+      p.actionFrame++
+      if (grounded) approach(p, 0, 0, KNOCKBACK_DECEL * dt)
+      if (p.actionFrame >= KNOCKDOWN_FRAMES) {
+        p.action = Action.Idle
+        p.actionFrame = 0
+        p.invuln = GETUP_INVULN_FRAMES
+      }
+      break
+    case Action.KO:
+      p.actionFrame++
+      if (grounded) approach(p, 0, 0, KNOCKBACK_DECEL * dt)
+      break
+    case Action.Falling:
+      break
+    default:
+      control(p, input, grounded, dt, env)
   }
 
-  integrate(p, dt, bodies)
-  return activeHitbox(p)
+  integrate(p, dt, env.bodies)
+  return event ?? activeBox(p)
 }
 
-function control(p: PlayerSim, input: InputLike, grounded: boolean, dt: number) {
-  if (input.pressed & Btn.PunchL) {
-    p.action = Action.Jab
-    p.actionFrame = 0
-    if (grounded) approach(p, 0, 0, MOVE_ACCEL * dt)
-    return
-  }
-
+/** 지상·공중 이동과 행동 시작 (Idle·Walk·Run·Air) */
+function control(p: PlayerSim, input: InputLike, grounded: boolean, dt: number, env: StepEnv) {
   const len = Math.sqrt(input.mx * input.mx + input.mz * input.mz)
   const dirX = len > 0 ? input.mx / len : 0
   const dirZ = len > 0 ? input.mz / len : 0
@@ -103,6 +226,20 @@ function control(p: PlayerSim, input: InputLike, grounded: boolean, dt: number) 
   if (len > 0) {
     p.fx = dirX
     p.fz = dirZ
+  }
+
+  // 가드는 누르고 있는 동안 다른 행동보다 앞선다 (가드 중 공격 키는 무시)
+  if (grounded && input.held & Btn.Guard) {
+    p.action = Action.Guard
+    p.actionFrame = 0
+    approach(p, 0, 0, MOVE_ACCEL * dt)
+    return
+  }
+
+  const next = pickAction(input.pressed, grounded, p.action === Action.Run)
+  if (next) {
+    startAction(p, next, grounded, dt, env)
+    return
   }
 
   if (!grounded) {
@@ -123,10 +260,94 @@ function control(p: PlayerSim, input: InputLike, grounded: boolean, dt: number) 
   }
 }
 
-function finishAction(p: PlayerSim, grounded: boolean) {
+/**
+ * 누른 버튼으로 시작할 행동. 여러 개면 잡기 > 발차기 > 오른손 > 왼손 순 — design §4.4
+ * 달리는 중 공격은 돌진, 공중 발차기는 날아차기. 공중에서는 잡을 수 없다
+ */
+function pickAction(pressed: number, grounded: boolean, running: boolean): number {
+  if (pressed & Btn.Grab && grounded) return Action.GrabTry
+  if (pressed & Btn.Kick) return !grounded ? Action.FlyingKick : running ? Action.Dash : Action.Kick
+  if (pressed & Btn.PunchR) return grounded && running ? Action.Dash : Action.Straight
+  if (pressed & Btn.PunchL) return grounded && running ? Action.Dash : Action.Jab
+  return 0
+}
+
+function startAction(p: PlayerSim, action: number, grounded: boolean, dt: number, env: StepEnv) {
+  p.action = action
+  p.actionFrame = 0
+  p.stun = 0
+  p.buffered = 0
+  // 공격·잡기를 하면 무적이 풀린다 — design §4.8
+  p.invuln = 0
+  aimAtNearest(p, env)
+  if (action === Action.Dash) {
+    const speed = dashSpeed(dt)
+    p.vx = p.fx * speed
+    p.vz = p.fz * speed
+  } else if (grounded) {
+    approach(p, 0, 0, MOVE_ACCEL * dt)
+  }
+}
+
+function stepAttack(p: PlayerSim, input: InputLike, grounded: boolean, dt: number, env: StepEnv) {
+  const def = ATTACKS[ATTACK_OF[p.action] as AttackId]
+  const total = def.startup + def.active + def.recovery
+  p.actionFrame++
+  bufferAction(p, input, total - p.actionFrame)
+  if (p.action === Action.Dash) {
+    // 선딜·판정 동안 내달리고, 판정이 끝나면 그 자리에 선다
+    const speed = p.actionFrame < def.startup + def.active ? dashSpeed(dt) : 0
+    p.vx = p.fx * speed
+    p.vz = p.fz * speed
+  } else if (grounded) {
+    approach(p, 0, 0, MOVE_ACCEL * dt)
+  }
+  if (p.actionFrame >= total) finish(p, grounded, dt, env)
+}
+
+/** 후딜 마지막 몇 프레임 안에 누른 공격·잡기를 기억해 둔다 */
+function bufferAction(p: PlayerSim, input: InputLike, remaining: number) {
+  if (remaining <= 0 || remaining > INPUT_BUFFER_FRAMES || !input.pressed) return
+  const next = pickAction(input.pressed, true, false)
+  if (next) p.buffered = next
+}
+
+/** 동작을 끝낸다. 선입력이 있으면 바로 이어서 시작한다 */
+function finish(p: PlayerSim, grounded: boolean, dt: number, env: StepEnv) {
+  const next = p.buffered
   p.action = grounded ? Action.Idle : Action.Air
   p.actionFrame = 0
   p.stun = 0
+  p.buffered = 0
+  if (next) startAction(p, next, grounded, dt, env)
+}
+
+function dashSpeed(dt: number) {
+  return DASH_DISTANCE / ((ATTACKS.dash.startup + ATTACKS.dash.active) * dt)
+}
+
+/** 조준 보정: 앞쪽 ±45°, 2m 안의 가장 가까운 상대 쪽으로 몸을 돌린다 — design §4.5 */
+function aimAtNearest(p: PlayerSim, env: StepEnv) {
+  if (!env.aimTargets) return
+  let best = AIM_ASSIST_RANGE * AIM_ASSIST_RANGE
+  let aimX = 0
+  let aimZ = 0
+  for (const t of env.aimTargets()) {
+    if (t === p) continue
+    const dx = t.x - p.x
+    const dz = t.z - p.z
+    const dist2 = dx * dx + dz * dz
+    if (dist2 > best || dist2 < 1e-12) continue
+    const dist = Math.sqrt(dist2)
+    if ((dx * p.fx + dz * p.fz) / dist < AIM_ASSIST_COS) continue
+    best = dist2
+    aimX = dx / dist
+    aimZ = dz / dist
+  }
+  if (aimX !== 0 || aimZ !== 0) {
+    p.fx = aimX
+    p.fz = aimZ
+  }
 }
 
 /** 수평 속도를 목표 속도 쪽으로 최대 maxDelta만큼 바꾼다 */
@@ -171,11 +392,17 @@ function integrate(p: PlayerSim, dt: number, bodies: Iterable<Body> | undefined)
   if (prevY >= 0 && p.y <= 0 && isInsideArena(p.x, p.z)) {
     p.y = 0
     p.vy = 0
-    if (p.action === Action.Air) p.action = Action.Idle
-  } else if (p.y < 0 && p.action !== Action.Falling) {
+    if (p.action === Action.Air) {
+      p.action = Action.Idle
+    } else if (p.action === Action.FlyingKick) {
+      p.action = Action.Landing
+      p.actionFrame = 0
+    }
+  } else if (p.y < 0 && p.action !== Action.Falling && p.action !== Action.KO) {
     p.action = Action.Falling
     p.actionFrame = 0
     p.stun = 0
+    p.buffered = 0
   }
 }
 
@@ -215,19 +442,23 @@ function separate(p: PlayerSim, bodies: Iterable<Body>) {
   }
 }
 
-/** 지금 판정 프레임이면 히트박스를, 아니면 null을 돌려준다 */
-export function activeHitbox(p: PlayerSim): HitQuery | null {
+/** 지금 판정 프레임이면 공격·잡기 판정을, 아니면 null을 돌려준다 */
+export function activeBox(p: PlayerSim): HitQuery | GrabQuery | null {
+  if (p.action === Action.GrabTry) {
+    const frame = p.actionFrame - GRAB.startup
+    if (frame < 0 || frame >= GRAB.active) return null
+    return {
+      kind: 'grab', first: frame === 0,
+      x: p.x + p.fx * GRAB.reach, y: p.y + GRAB.height, z: p.z + p.fz * GRAB.reach, r: GRAB.radius,
+    }
+  }
   const attack = ATTACK_OF[p.action]
   if (attack === undefined) return null
   const def = ATTACKS[attack]
   const frame = p.actionFrame - def.startup
   if (frame < 0 || frame >= def.active) return null
   return {
-    attack,
-    first: frame === 0,
-    x: p.x + p.fx * def.reach,
-    y: p.y + def.height,
-    z: p.z + p.fz * def.reach,
-    r: def.radius,
+    kind: 'hit', attack, first: frame === 0,
+    x: p.x + p.fx * def.reach, y: p.y + def.height, z: p.z + p.fz * def.reach, r: def.radius,
   }
 }

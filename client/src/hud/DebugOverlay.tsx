@@ -52,10 +52,18 @@ export function DebugOverlay({ session }: { session: GameSession }) {
         <dd>{stats.pendingInputs}</dd>
         <dt>예측 보정</dt>
         <dd>마지막 {stats.correctionCm}cm · 평균 {stats.driftCm}cm</dd>
-        <dt>잽 명중</dt>
+        <dt>공격 명중</dt>
         <dd>내 화면 {stats.predictedHits} · 서버 확정 {stats.confirmedHits}</dd>
+        <dt>내 동작</dt>
+        <dd>{stats.myAction}</dd>
         <dt>대상 HP</dt>
         <dd>{stats.targets.length > 0 ? stats.targets.map((t) => `${t.label} ${t.hp}`).join(' · ') : '없음'}</dd>
+        <dt>최근 탈락</dt>
+        <dd>
+          {stats.recentElims.length > 0
+            ? stats.recentElims.map((e) => `${e.victim} ${e.cause}${e.killer ? ` ← ${e.killer}` : ''}`).join(' · ')
+            : '없음'}
+        </dd>
       </dl>
       <div className="debug-buttons" role="group" aria-label="왕복 지연 주입">
         {LATENCIES.map((ms) => (
@@ -73,7 +81,7 @@ export function DebugOverlay({ session }: { session: GameSession }) {
       </div>
       {error && <p role="alert">{error}</p>}
       <p className="debug-hint">
-        초록 상자: 서버가 본 내 위치 · 빨간 구: 내 잽 판정
+        초록 상자: 서버가 본 내 위치 · 빨간 구: 내 공격 판정 · 보라 구: 잡기 판정
         <br />
         샌드백은 내 앞에 생깁니다. 지연을 바꾸면 다시 접속하니 다시 세워 주세요
       </p>
