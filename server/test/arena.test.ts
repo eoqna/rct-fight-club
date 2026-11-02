@@ -1,6 +1,6 @@
 import { boot, type ColyseusTestServer } from '@colyseus/testing'
 import {
-  Action, Btn, IDLE_INPUT, Msg, PlayerInput, ROOM_NAME, SIM_FIELDS, TICK_RATE, WALK_SPEED, stepPlayer,
+  Action, BODY_RADIUS, Btn, IDLE_INPUT, Msg, PlayerInput, ROOM_NAME, SIM_FIELDS, TICK_RATE, WALK_SPEED, stepPlayer,
   type HitEvent, type PlayerSim, type PlayerState,
 } from '@fight-club/shared'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -130,6 +130,22 @@ describe('게임 서버', () => {
     await waitTicks(room, 90)
     expect(player.y).toBe(0)
     expect(player.action).toBe(Action.Idle)
+  })
+
+  it('다른 플레이어를 통과하지 못하고 맞닿은 자리에서 멈춘다. 서 있는 쪽은 밀리지 않는다', async () => {
+    const room = await colyseus.createRoom(ROOM_NAME)
+    const walker = await colyseus.connectTo(room)
+    const blocker = await colyseus.connectTo(room)
+    const a = room.state.players.get(walker.sessionId)!
+    const b = room.state.players.get(blocker.sessionId)!
+    place(a, 0, 0)
+    place(b, 2, 0)
+
+    const input = walker.input({ type: PlayerInput, mode: 'reliable' })
+    await sendEachTick(room, input, 60, (data) => { data.mx = 127 })
+
+    expect(a.x).toBeCloseTo(2 - BODY_RADIUS * 2, 3)
+    expect(b.x).toBeCloseTo(2, 6)
   })
 
   it('잽은 바로 앞 상대를 맞히고 공격자 반대쪽으로 밀어낸다', async () => {

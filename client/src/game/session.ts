@@ -68,6 +68,8 @@ export class GameSession {
   private readonly timeline = new ActionTimeline(INTERP_DELAY_MS)
   private readonly listeners = new Set<() => void>()
   private ids: string[] = []
+  /** 내 예측이 부딪히는 다른 몸들. 서버가 마지막으로 보낸 위치를 그대로 쓴다 (서버 판정과 가장 가깝다) */
+  private readonly others: PlayerState[] = []
   /** 이번 공격에 내 화면에서 이미 맞힌 상대 */
   private readonly struck = new Set<string>()
   private predictedHits = 0
@@ -89,9 +91,12 @@ export class GameSession {
     const callbacks = Callbacks.get<ArenaState>(room)
     callbacks.onAdd('players', (player, id) => {
       if (id === room.sessionId) this.predictSelf(player)
+      else this.others.push(player)
       this.updateIds()
     })
-    callbacks.onRemove('players', (_player, id) => {
+    callbacks.onRemove('players', (player, id) => {
+      const index = this.others.indexOf(player)
+      if (index >= 0) this.others.splice(index, 1)
       this.timeline.forget(id)
       this.updateIds()
     })
@@ -235,7 +240,7 @@ export class GameSession {
       fields: SIM_FIELDS,
       smoothMs: CORRECTION_SMOOTH_MS,
       step: (ctx, state, command) => {
-        const query = stepPlayer(state, command, ctx.dt)
+        const query = stepPlayer(state, command, ctx.dt, this.others)
         // 다시 적용(replay)할 때는 이펙트를 또 띄우지 않는다
         if (query && !ctx.isReplay) this.predictHit(query)
       },

@@ -1,7 +1,8 @@
 import { Action, Btn } from '../actions.ts'
 import { ATTACKS, type AttackId } from '../attacks.ts'
 import {
-  AIR_ACCEL, ARENA_HALF, GRAVITY, JUMP_SPEED, KNOCKBACK_DECEL, MOVE_ACCEL, RUN_SPEED, WALK_SPEED,
+  AIR_ACCEL, ARENA_HALF, BODY_HEIGHT, BODY_RADIUS, GRAVITY, JUMP_SPEED, KNOCKBACK_DECEL, MOVE_ACCEL, RUN_SPEED,
+  WALK_SPEED,
 } from '../constants.ts'
 
 /** stepPlayer가 다루는 상태. 서버의 PlayerState와 클라이언트 예측 미러가 모두 이 모양이다 */
@@ -32,6 +33,16 @@ export interface InputLike {
 
 export const IDLE_INPUT: InputLike = Object.freeze({ mx: 0, mz: 0, held: 0, pressed: 0 })
 
+/** 부딪힐 수 있는 다른 몸의 발 위치 */
+export interface Body {
+  x: number
+  y: number
+  z: number
+}
+
+/** 두 몸 중심 사이의 최소 거리 */
+const BODY_GAP = BODY_RADIUS * 2
+
 /** 판정 프레임마다 반환되는 질의. 서버가 랙 보상으로 판정한다 — design §4.12 */
 export interface HitQuery {
   attack: AttackId
@@ -52,8 +63,10 @@ export function isInsideArena(x: number, z: number): boolean {
 /**
  * 플레이어를 고정 스텝 하나만큼 진행한다. 클라이언트 예측과 서버가 같은 함수를 부르므로
  * 사칙연산과 Math.sqrt만 쓴다 (엔진 간 결과 동일) — design §4.10
+ *
+ * bodies: 부딪힐 다른 몸들. p 자신이 섞여 있어도 된다 (같은 객체는 건너뛴다)
  */
-export function stepPlayer(p: PlayerSim, input: InputLike, dt: number): HitQuery | null {
+export function stepPlayer(p: PlayerSim, input: InputLike, dt: number, bodies?: Iterable<Body>): HitQuery | null {
   const grounded = p.y === 0 && isInsideArena(p.x, p.z)
   const attack = ATTACK_OF[p.action]
 
@@ -70,7 +83,7 @@ export function stepPlayer(p: PlayerSim, input: InputLike, dt: number): HitQuery
     control(p, input, grounded, dt)
   }
 
-  integrate(p, dt)
+  integrate(p, dt, bodies)
   return activeHitbox(p)
 }
 
@@ -144,9 +157,10 @@ function steerInAir(p: PlayerSim, dirX: number, dirZ: number, maxDelta: number) 
   }
 }
 
-function integrate(p: PlayerSim, dt: number) {
+function integrate(p: PlayerSim, dt: number, bodies: Iterable<Body> | undefined) {
   p.x += p.vx * dt
   p.z += p.vz * dt
+  if (bodies) separate(p, bodies)
   if (p.y === 0 && p.vy === 0 && isInsideArena(p.x, p.z)) return
 
   // 등가속도 운동의 정확한 적분 — 점프 궤적이 스텝 크기에 흔들리지 않는다
@@ -162,6 +176,42 @@ function integrate(p: PlayerSim, dt: number) {
     p.action = Action.Falling
     p.actionFrame = 0
     p.stun = 0
+  }
+}
+
+/**
+ * 다른 몸을 통과하지 못하게 한다: 겹친 만큼 나를 밀어내고, 그쪽으로 향하던 속도를 없앤다
+ * (비스듬히 부딪히면 옆으로 미끄러진다). 상대는 밀지 않는다 — design §4.3
+ */
+function separate(p: PlayerSim, bodies: Iterable<Body>) {
+  // 바닥 아래로 떨어지는 몸은 아무것과도 부딪히지 않는다
+  if (p.y < 0) return
+  const wasInside = isInsideArena(p.x, p.z)
+  for (const b of bodies) {
+    if (b === p) continue
+    // 상대 위치는 전송 정밀도(float32)로 읽는다 — 서버 값과 클라이언트가 받은 값이 같아져 예측이 정확히 맞는다
+    const by = Math.fround(b.y)
+    if (by < 0 || Math.abs(p.y - by) >= BODY_HEIGHT) continue
+    const dx = p.x - Math.fround(b.x)
+    const dz = p.z - Math.fround(b.z)
+    const dist2 = dx * dx + dz * dz
+    if (dist2 >= BODY_GAP * BODY_GAP) continue
+    const dist = Math.sqrt(dist2)
+    // 정확히 같은 자리면 정해진 방향(+x)으로 밀어낸다
+    const nx = dist > 1e-9 ? dx / dist : 1
+    const nz = dist > 1e-9 ? dz / dist : 0
+    p.x += nx * (BODY_GAP - dist)
+    p.z += nz * (BODY_GAP - dist)
+    const toward = p.vx * nx + p.vz * nz
+    if (toward < 0) {
+      p.vx -= toward * nx
+      p.vz -= toward * nz
+    }
+  }
+  // 몸에 밀려서는 경기장 밖으로 나가지 않는다 (스스로 걸어 나간 경우는 그대로 떨어진다)
+  if (wasInside && !isInsideArena(p.x, p.z)) {
+    p.x = Math.max(-ARENA_HALF, Math.min(ARENA_HALF, p.x))
+    p.z = Math.max(-ARENA_HALF, Math.min(ARENA_HALF, p.z))
   }
 }
 

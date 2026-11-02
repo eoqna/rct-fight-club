@@ -138,7 +138,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   }
 
   private advancePlayer(id: string, player: PlayerState, input: InputLike, dt: number, lagComp: boolean, hits: PendingHit[]) {
-    const query = stepPlayer(player, input, dt)
+    const query = stepPlayer(player, input, dt, this.state.players.values())
     if (!query) return
 
     if (query.first) this.struck.set(id, new Set())
