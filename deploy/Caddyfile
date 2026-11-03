@@ -1,0 +1,62 @@
+# Fight Club — 같은 VM에서 게임 화면(정적 파일)과 게임 서버를 한 도메인으로 내보낸다 (design §8.1, P7-2·3)
+# SITE: 도메인 (예: fightclub.duckdns.org). 인증서는 Caddy가 Let's Encrypt에서 자동으로 받고 갱신한다
+{
+	# 설정을 바꿀 일은 컨테이너를 다시 띄워 한다 — 관리 API(:2019)는 열지 않는다
+	admin off
+	# Caddy는 게임 서버에 닿지 못할 때(재시작 중 등) 오류 로그에 요청의 IP·헤더를 함께 남긴다 — 그 필드만 지운다 (NFR-10)
+	log default {
+		format filter {
+			fields {
+				request>remote_ip delete
+				request>remote_port delete
+				request>client_ip delete
+				request>headers delete
+			}
+		}
+	}
+}
+
+{$SITE} {
+	# 접속 기록(access log)은 남기지 않는다 — IP가 들어간다 (NFR-10)
+
+	# 게임 서버: WebSocket, 입장 요청(HTTP), 공개 API, 운영 화면, 헬스 체크
+	@websocket {
+		header Connection *Upgrade*
+		header Upgrade websocket
+	}
+	@game path /matchmake/* /api/* /admin /admin/* /healthz
+	handle @websocket {
+		reverse_proxy server:2567
+	}
+	handle @game {
+		reverse_proxy server:2567
+	}
+
+	# 게임 화면
+	handle {
+		root * /srv
+		# 파일 이름에 해시가 붙은 JS·CSS(/build/)는 1년 — 내용이 바뀌면 이름이 바뀐다
+		@hashed path /build/*
+		header @hashed Cache-Control "public, max-age=31536000, immutable"
+		# 나머지(index.html, 이름이 그대로인 GLB·WAV)는 매번 바뀌었는지 묻는다 — 그대로면 304로 끝난다
+		@revalidate not path /build/*
+		header @revalidate Cache-Control "no-cache"
+		header {
+			# wasm-unsafe-eval: 캐릭터 모델의 meshopt 압축 풀기(WebAssembly).
+			# blob:: 모델 안에 든 텍스처를 GLTFLoader가 blob URL로 만들어 fetch로 읽는다 (connect-src에 없으면 캐릭터가 텍스처 없이 보인다)
+			Content-Security-Policy "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data: blob:; media-src 'self' data: blob:; connect-src 'self' blob: data: wss://{$SITE}; worker-src 'self' blob:; object-src 'none'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'"
+			Permissions-Policy "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+			Referrer-Policy "strict-origin-when-cross-origin"
+			X-Content-Type-Options "nosniff"
+		}
+		# 미리 압축해 둔 .br·.gz가 있으면 그것을 보낸다 (deploy/precompress.mjs)
+		file_server {
+			precompressed br gzip
+		}
+	}
+
+	header {
+		Strict-Transport-Security "max-age=31536000"
+		-Server
+	}
+}

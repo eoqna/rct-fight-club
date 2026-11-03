@@ -9,7 +9,8 @@
 | `client/` | 웹 클라이언트 (Vite + React) |
 | `server/` | 게임 서버 (Colyseus) |
 | `shared/` | 클라이언트·서버 공용 코드 (상수, 프로토콜, 시뮬레이션) |
-| `docs/` | [요구사항](docs/requirements.md) · [설계](docs/design.md) |
+| `docs/` | [요구사항](docs/requirements.md) · [설계](docs/design.md) · [플레이테스트 안내](docs/playtest.md) · [출시 점검표](docs/release-checklist.md) |
+| `deploy/` | [배포](deploy/README.md) — Caddy·Docker Compose 구성과 배포·되돌리기·로컬 스테이징 스크립트 |
 | `claudedocs/` | [구현 워크플로](claudedocs/workflow_fight-club.md) · [에셋·라이선스 기록](claudedocs/assets_fight-club.md) |
 | `tools/assets/` | 캐릭터·애니메이션·효과음 에셋 파이프라인 (결과는 `client/public/assets/`) |
 
@@ -66,6 +67,7 @@ npm run dev   # 게임 서버(:2567)와 클라이언트(:5173)를 함께 실행
 | `npm run lint` | ESLint |
 | `npm test` | Vitest (shared·server·client) |
 | `npm run test:e2e` | E2E — 시작 → 선택 → 입장 → 탈락 → 결과 → 다시 하기 (설치된 Chrome, 서버 2767·클라이언트 5373을 스스로 띄운다) |
+| `npm run loadtest -- --url <주소> --admin <비밀번호>` | 부하 시험 — 가짜 플레이어 192명(기본)을 붙이고 서버 지표를 목표와 비교 ([배포 안내](deploy/README.md#부하-시험-p7-4)) |
 | `npm run assets:build` | 에셋 다시 만들기: 원본 받기 → 캐릭터 굽기(설치된 Google Chrome 필요, 다른 경로면 `CHROME_PATH`) → 압축 → 효과음 합성 → 용량 검사 |
 | `npm run assets:check` | 용량 예산 검사 (design §7.7) — 넘으면 실패 |
 
@@ -74,13 +76,14 @@ npm run dev   # 게임 서버(:2567)와 클라이언트(:5173)를 함께 실행
 | 이름 | 위치 | 내용 |
 |---|---|---|
 | `PORT` | 서버 | 게임 서버 포트 (기본 2567) |
-| `VITE_GAME_SERVER_URL` | 클라이언트 | 게임 서버 주소 (기본: 현재 호스트의 2567 포트) |
+| `VITE_GAME_SERVER_URL` | 클라이언트 | 게임 서버 주소 (기본: 개발 중에는 현재 호스트의 2567 포트, 운영 빌드는 화면과 같은 주소) |
 | `BOTS` | 서버 | `0`이면 봇을 넣지 않는다 (E2E·자동 점검처럼 정해진 사람끼리만 있어야 할 때) |
 | `COLYSEUS_LATENCY` | 서버 | 개발용: 서버 시작부터 줄 지연 (ms) |
 | `NODE_ENV` | 서버 | `production`이면 운영 설정: 같은 컴퓨터의 접속도 IP 제한을 받고, 입장 방식은 `joinOrCreate`만, 개발용 기능(샌드백·지연 주입)은 끈다 |
 | `ALLOWED_ORIGINS` | 서버 | 게임 서버에 들어올 수 있는 웹 페이지 출처, 쉼표로 구분 (예: `https://fight.example.com`). **운영에서는 꼭 정한다** — 없으면 서버가 시작하지 않는다 |
 | `TRUST_PROXY` | 서버 | 서버 앞에 둔 리버스 프록시 수 (Caddy 한 대면 `1`, 기본 `0`). 이만큼만 `X-Forwarded-For`를 믿는다 — 프록시 뒤에서 빠뜨리면 모든 사람이 프록시 주소 하나로 세어진다 |
 | `ADMIN_PASSWORD` | 서버 | 있으면 `/admin` 운영 화면을 연다 (사용자 `admin`, 12자 이상) |
+| `IP_LIMIT_EXEMPT` | 서버 | IP 제한에서 뺄 주소·대역, 쉼표로 구분 (예: `203.0.113.7,10.0.0.0/8`) — 부하 시험·플레이테스트 때만 |
 | `LOG_LEVEL` | 서버 | 로그 수준 (기본 `info`, `debug`면 거절도 하나하나 남긴다) |
 
 ## 보안·운영
@@ -89,6 +92,17 @@ npm run dev   # 게임 서버(:2567)와 클라이언트(:5173)를 함께 실행
 - **로그**: 서버는 한 줄에 JSON 하나씩 남기고(입장·퇴장·탈락·오류), 1분마다 접속자·경기장·틱 처리 시간·패치 크기 지표를 남긴다. IP는 남기지 않는다.
 - **운영 화면**: `ADMIN_PASSWORD`를 정하고 `/admin`(표) 또는 `/admin/metrics`(JSON)를 연다. 보기만 할 수 있다.
 - 자세한 내용: [설계 §6.7 보안](docs/design.md) · §6.9 개인정보 점검표 · §8.3 관측
+
+## 배포
+
+한 대의 VM(AWS Lightsail 서울)에서 Caddy(자동 HTTPS·게임 화면)와 게임 서버를 Docker로 띄운다. 처음 준비부터 배포·되돌리기·로그·부하 시험까지 [deploy/README.md](deploy/README.md)에 있다.
+
+```sh
+deploy/local.sh up                       # 운영과 같은 구성을 이 컴퓨터에서 (https://localhost:8443, Docker 필요)
+SSH_KEY=<키> deploy/ship.sh ubuntu@<IP>  # 커밋한 것을 운영 서버에 배포
+```
+
+공개 전 [플레이테스트 진행 안내](docs/playtest.md) · [출시 점검표](docs/release-checklist.md)
 
 ## 크레딧
 

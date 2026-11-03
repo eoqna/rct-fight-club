@@ -18,7 +18,7 @@ const GROUPS = [
   { name: '경기장', dir: 'client/public/assets/arena', total: 1.5 * MB },
   { name: '효과음', dir: 'client/public/assets/sfx', total: 1.5 * MB },
   // 시작 화면 묶음 예산이지만, 빌드 결과의 JS 전체가 넘지 않으면 시작 묶음도 넘지 않는다
-  { name: 'JS 번들 전체 (gzip, 빌드했을 때만)', dir: 'client/dist/assets', ext: '.js', total: 1.2 * MB, gzip: true },
+  { name: 'JS 번들 전체 (gzip, 빌드했을 때만)', dir: 'client/dist/build', ext: '.js', total: 1.2 * MB, gzip: true },
 ]
 
 const fmt = (bytes) => `${(bytes / MB).toFixed(2)}MB`

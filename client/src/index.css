@@ -523,6 +523,22 @@ button.secondary:focus-visible,
   pointer-events: none;
 }
 
+/* HUD: 서버 점검 안내 (경기장 정보 아래) */
+.maintenance-banner {
+  position: absolute;
+  top: 52px;
+  left: 50%;
+  transform: translateX(-50%);
+  padding: 8px 18px;
+  border-radius: 10px;
+  background: rgb(214 92 40 / 0.92);
+  color: #fff;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
 /* HUD: 킬 피드·순위표 (오른쪽 위) */
 .hud-right {
   position: absolute;

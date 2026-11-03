@@ -5,7 +5,7 @@ import type { ServerConfig } from '../config.ts'
 import type { log as serverLog } from '../log.ts'
 import { countBlocked, type BlockReason } from '../ops/metrics.ts'
 import type { IpLimits } from '../store/limits.ts'
-import { CLIENT_KEY_HEADER, EXEMPT_KEY, clientIp, clientKey, isLoopback } from './clientKey.ts'
+import { CLIENT_KEY_HEADER, EXEMPT_KEY, clientIp, clientKey, inRanges, isLoopback } from './clientKey.ts'
 
 /** 입장 요청 본문 상한 (바이트) — JoinOptions는 100바이트 남짓이다 */
 const MAX_JOIN_BODY_BYTES = 1024
@@ -106,7 +106,9 @@ class GatedServer extends Server {
       log.warn({ event: 'config' }, 'X-Forwarded-For가 붙은 요청이 왔지만 TRUST_PROXY=0이라 무시합니다 — 프록시 뒤라면 TRUST_PROXY=1로 두세요 (아니면 모든 접속이 프록시 주소 하나로 세어집니다)')
     }
     const ip = clientIp(req, config.trustProxy)
-    const key = config.exemptLoopback && isLoopback(ip) ? EXEMPT_KEY : clientKey(ip)
+    // 개발 중 같은 컴퓨터의 탭, 부하 시험을 보내는 컴퓨터(IP_LIMIT_EXEMPT)는 IP 제한에서 뺀다
+    const exempt = (config.exemptLoopback && isLoopback(ip)) || inRanges(ip, config.ipLimitExempt)
+    const key = exempt ? EXEMPT_KEY : clientKey(ip)
     req.headers[CLIENT_KEY_HEADER] = key
     return key
   }

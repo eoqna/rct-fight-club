@@ -9,7 +9,7 @@ import {
   TICK_RATE, VARIANT_COUNT, applyHit, applyThrow, hitsBody, isGrabbable, isGuarding, isHittable, isNameIndex,
   randomNameIndex, rankEntries, stepPlayer, uniqueName,
   type AttackId, type Body, type DevDummyCommand, type ElimCause, type ElimEvent, type HitEvent, type InputLike,
-  type JoinOptions, type ResultMsg, type StatsResponse, type StrikeId,
+  type JoinOptions, type MaintenanceMsg, type ResultMsg, type StatsResponse, type StrikeId,
 } from '@fight-club/shared'
 import { BotBrain, type BotWorld } from '../bots/brain.ts'
 import { config } from '../config.ts'
@@ -253,6 +253,19 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> i
   async onDispose() {
     arenas.delete(this)
     await store.arenaNumbers.release(this.arenaNo)
+  }
+
+  /**
+   * 서버를 멈출 때(배포·재시작, design §8.1): Colyseus가 새 입장을 막고 경기장을 잠근 뒤 부른다.
+   * 경기 중인 사람에게 알리고 잠시 뒤 끊는다 — Colyseus는 모든 경기장이 닫힐 때까지 기다렸다가 끝낸다
+   */
+  onBeforeShutdown() {
+    const notice: MaintenanceMsg = { seconds: Math.ceil(config.shutdownNoticeMs / 1000) }
+    log.info({ event: 'shutdown', arena: this.arenaNo, humans: this.humans, noticeSeconds: notice.seconds })
+    if (notice.seconds > 0) this.broadcast(Msg.Maintenance, notice)
+    this.clock.setTimeout(() => {
+      this.disconnect(CloseCode.Maintenance).catch(() => {})
+    }, config.shutdownNoticeMs)
   }
 
   /**

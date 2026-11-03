@@ -107,7 +107,7 @@ function page(s: MetricsSnapshot): string {
 <p>틱 처리 ms (평균 / p95 / 최대, 지난 1분): ${ms(s.tickMs)}</p>
 <p>상태 패치 바이트 (평균 / p95 / 최대): ${ms(s.patchBytes)} · 한 사람이 받는 양 ${s.patchBytesPerPlayerPerSec} B/s</p>
 <p>거절·차단 (시작 뒤 누적): ${blocked}</p>
-<p>메모리 ${s.memory.rssMb} MB (힙 ${s.memory.heapUsedMb} MB)</p>
+<p>CPU ${s.cpuPercent.avg}% (최대 ${s.cpuPercent.max}%, 코어 하나 = 100%) · 메모리 ${s.memory.rssMb} MB (힙 ${s.memory.heapUsedMb} MB)</p>
 <table>
   <tr><th>경기장</th><th>사람</th><th>봇</th><th>틱 ms</th><th>패치 바이트</th></tr>
   ${rows}

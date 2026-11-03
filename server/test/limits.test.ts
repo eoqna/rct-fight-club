@@ -1,7 +1,7 @@
 import type { IncomingMessage } from 'node:http'
 import { describe, expect, it } from 'vitest'
 import { loadConfig } from '../src/config.ts'
-import { clientIp, clientKey, isLoopback, limitScope } from '../src/security/clientKey.ts'
+import { clientIp, clientKey, inRanges, isLoopback, limitScope } from '../src/security/clientKey.ts'
 import { MemoryArenaNumbers } from '../src/store/arenaNumbers.ts'
 import { MemoryIpLimits } from '../src/store/limits.ts'
 
@@ -101,6 +101,16 @@ describe('보낸 쪽 IP와 제한 키', () => {
     expect(clientKey('203.0.113.8')).not.toBe(key)
   })
 
+  it('IP_LIMIT_EXEMPT: 주소 하나와 대역을 모두 알아본다', () => {
+    const list = ['203.0.113.7', '10.0.0.0/8', '2001:db8::/32']
+    expect(inRanges('203.0.113.7', list)).toBe(true)
+    expect(inRanges('203.0.113.8', list)).toBe(false)
+    expect(inRanges('10.20.30.40', list)).toBe(true)
+    expect(inRanges('2001:db8:1::5', list)).toBe(true)
+    expect(inRanges('2001:db9::5', list)).toBe(false)
+    expect(inRanges('10.0.0.1', [])).toBe(false)
+  })
+
   it('루프백(같은 컴퓨터)을 알아본다', () => {
     expect(isLoopback('127.0.0.1')).toBe(true)
     expect(isLoopback('::1')).toBe(true)
@@ -113,11 +123,13 @@ describe('서버 설정', () => {
     expect(() => loadConfig({ NODE_ENV: 'production' })).toThrow(/ALLOWED_ORIGINS/)
   })
 
-  it('운영에서는 루프백 제외를 끄고, 입장 방식은 joinOrCreate만 받는다', () => {
+  it('운영에서는 루프백 제외를 끄고, 입장 방식은 joinOrCreate만 받고, 멈출 때 10초 동안 알린다', () => {
     const config = loadConfig({ NODE_ENV: 'production', ALLOWED_ORIGINS: 'https://fight.example.com, https://www.fight.example.com' })
     expect(config.allowedOrigins).toEqual(['https://fight.example.com', 'https://www.fight.example.com'])
     expect(config.exemptLoopback).toBe(false)
     expect(config.matchmakeMethods).toEqual(['joinOrCreate'])
+    expect(config.shutdownNoticeMs).toBe(10_000)
+    expect(config.ipLimitExempt).toEqual([])
     expect(config.trustProxy).toBe(0)
     expect(config.adminPassword).toBeNull()
   })
@@ -127,6 +139,7 @@ describe('서버 설정', () => {
     expect(config.allowedOrigins).toEqual([])
     expect(config.exemptLoopback).toBe(true)
     expect(config.matchmakeMethods).toBeNull()
+    expect(config.shutdownNoticeMs).toBe(0)
   })
 
   it('값이 잘못되면 알아보기 쉬운 오류로 멈춘다', () => {
@@ -135,6 +148,9 @@ describe('서버 설정', () => {
     expect(() => loadConfig({ TRUST_PROXY: '-1' })).toThrow(/TRUST_PROXY/)
     expect(() => loadConfig({ TRUST_PROXY: 'yes' })).toThrow(/TRUST_PROXY/)
     expect(() => loadConfig({ ADMIN_PASSWORD: 'short' })).toThrow(/12자/)
+    expect(() => loadConfig({ IP_LIMIT_EXEMPT: 'loadtest.example.com' })).toThrow(/IP_LIMIT_EXEMPT/)
+    expect(() => loadConfig({ IP_LIMIT_EXEMPT: '10.0.0.0/33' })).toThrow(/IP_LIMIT_EXEMPT/)
+    expect(loadConfig({ IP_LIMIT_EXEMPT: '203.0.113.7, 10.0.0.0/8' }).ipLimitExempt).toEqual(['203.0.113.7', '10.0.0.0/8'])
     expect(loadConfig({ TRUST_PROXY: '1', ADMIN_PASSWORD: 'long-enough-secret' })).toMatchObject({ trustProxy: 1, adminPassword: 'long-enough-secret' })
   })
 })

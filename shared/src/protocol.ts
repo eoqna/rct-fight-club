@@ -18,6 +18,8 @@ export const Msg = {
   Elim: 'elim',
   /** 서버 → 탈락한 본인: 결과. 직후 CloseCode.Eliminated로 연결이 끊긴다 */
   Result: 'result',
+  /** 서버 → 모두: 서버 점검(배포·재시작)으로 곧 연결이 끊긴다 — MaintenanceMsg. 그 뒤 CloseCode.Maintenance */
+  Maintenance: 'maintenance',
   /** 개발 전용, 서버 → 모두: 지연 주입이 바뀌었다 — 클라이언트는 다시 입장한다 */
   DevLatency: 'dev:latency',
   /** 개발 전용, 클라이언트 → 서버: 연습용 샌드백 소환·정리 */
@@ -51,6 +53,8 @@ export const CloseCode = {
   VersionMismatch: 4102,
   /** 같은 IP에서 동시에 접속한 수가 상한에 닿았다 (NFR-06) */
   TooManyConnections: 4103,
+  /** 서버 점검(배포·재시작)으로 연결을 끊었다 → 잠시 뒤 다시 들어오라고 안내 */
+  Maintenance: 4104,
 } as const
 
 /** 입장 요청(HTTP)을 거절할 때의 상태 코드 — 클라이언트는 MatchMakeError.code로 받는다 (design §6.7) */
@@ -60,6 +64,11 @@ export const JoinRejectStatus = {
   /** 같은 IP의 입장 요청이 1분에 상한을 넘었다 */
   TooManyRequests: 429,
 } as const
+
+/** 서버 점검 안내 — 이만큼 뒤에 연결이 끊긴다 */
+export interface MaintenanceMsg {
+  seconds: number
+}
 
 /** 같은 IP에서 동시에 접속할 수 있는 수, 1분에 보낼 수 있는 입장 요청 수 — NFR-06 */
 export const MAX_CONNECTIONS_PER_IP = 3

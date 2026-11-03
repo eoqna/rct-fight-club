@@ -4,11 +4,15 @@ import { log } from '../log.ts'
 /** 지표는 지난 1분을 본다 (s) */
 const WINDOW_SECONDS = 60
 
-/** 경고 기준: 경기장 틱 처리 p95 (ms) — design §8.3 */
+/** 경고 기준: 경기장 틱 처리 p95 (ms), 프로세스 CPU (%) — design §8.3 */
 const TICK_P95_WARN_MS = 4
+const CPU_WARN_PERCENT = 70
 
 /** 지표 로그 간격 (ms) */
 const LOG_EVERY_MS = 60_000
+
+/** CPU 사용률을 재는 간격 (ms) — 지난 1분은 12번 */
+const CPU_SAMPLE_MS = 5_000
 
 /** 거절·차단 이유 — design §6.7 (flood: 메시지를 너무 많이 보내 연결을 끊었다) */
 export type BlockReason = 'origin' | 'method' | 'body' | 'joinRate' | 'connections' | 'version' | 'flood'
@@ -29,6 +33,20 @@ class Recent {
   toArray(): number[] {
     return Array.from(this.values.subarray(0, Math.min(this.count, this.values.length)))
   }
+}
+
+/**
+ * 이 프로세스의 CPU 사용률 (%, 코어 하나 = 100) — 5초마다 잰다. 게임 루프는 스레드 하나에서 돌므로
+ * 100%에 가까워지면 틱이 밀린다 (경고 기준 70%, design §8.3)
+ */
+const cpuSamples = new Recent(LOG_EVERY_MS / CPU_SAMPLE_MS)
+let cpuMark = { usage: process.cpuUsage(), at: performance.now() }
+
+function sampleCpu() {
+  const now = performance.now()
+  const used = process.cpuUsage(cpuMark.usage)
+  cpuSamples.push(((used.user + used.system) / 1000 / (now - cpuMark.at)) * 100)
+  cpuMark = { usage: process.cpuUsage(), at: now }
 }
 
 /** 경기장 하나의 지난 1분 기록: 틱 처리 시간(ms)과 상태 패치 크기(바이트) */
@@ -65,6 +83,8 @@ export interface MetricsSnapshot {
   patchBytesPerPlayerPerSec: number
   /** 서버가 시작된 뒤 거절하거나 끊은 수 (이유별) */
   blocked: Record<BlockReason, number>
+  /** 프로세스 CPU 사용률 (%, 코어 하나 = 100, 지난 1분) — 지표 로그를 켠 뒤부터 잰다 */
+  cpuPercent: Spread
   memory: { rssMb: number; heapUsedMb: number }
   uptimeSec: number
   perArena: { arenaNo: number; humans: number; bots: number; tickMs: Spread; patchBytes: Spread }[]
@@ -107,24 +127,31 @@ export function snapshot(arenas: Iterable<MeteredArena>): MetricsSnapshot {
     patchBytes: spread(patches),
     patchBytesPerPlayerPerSec: busiest,
     blocked: { ...blocked },
+    cpuPercent: spread(cpuSamples.toArray()),
     memory: { rssMb: round(memory.rss / 2 ** 20), heapUsedMb: round(memory.heapUsed / 2 ** 20) },
     uptimeSec: Math.round(process.uptime()),
     perArena,
   }
 }
 
-/** 지표를 로그 한 줄로 남긴다. 틱 처리 p95가 경고 기준을 넘으면 warn */
+/** 지표를 로그 한 줄로 남긴다. 틱 처리 p95나 CPU가 경고 기준을 넘으면 warn */
 export function logMetrics(arenas: Iterable<MeteredArena>) {
   const s = snapshot(arenas)
-  const level = s.tickMs.p95 > TICK_P95_WARN_MS ? 'warn' : 'info'
+  const level = s.tickMs.p95 > TICK_P95_WARN_MS || s.cpuPercent.avg > CPU_WARN_PERCENT ? 'warn' : 'info'
   log[level]({ event: 'metrics', ...s }, '1분 지표')
 }
 
-/** 1분마다 지표 로그 (P6-3). 멈추는 함수를 돌려준다 */
+/** 1분마다 지표 로그 (P6-3), 5초마다 CPU 측정. 멈추는 함수를 돌려준다 */
 export function startMetricsLog(arenas: () => Iterable<MeteredArena>, everyMs = LOG_EVERY_MS): () => void {
+  cpuMark = { usage: process.cpuUsage(), at: performance.now() }
+  const cpu = setInterval(sampleCpu, Math.min(CPU_SAMPLE_MS, everyMs))
   const timer = setInterval(() => logMetrics(arenas()), everyMs)
+  cpu.unref()
   timer.unref()
-  return () => clearInterval(timer)
+  return () => {
+    clearInterval(cpu)
+    clearInterval(timer)
+  }
 }
 
 function spread(values: number[]): Spread {

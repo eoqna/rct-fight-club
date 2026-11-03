@@ -15,6 +15,7 @@
     "lint": "eslint .",
     "test": "vitest run",
     "test:e2e": "playwright test",
+    "loadtest": "tsx server/loadtest/run.ts",
     "assets:fetch": "node tools/assets/fetch.mjs",
     "assets:build": "node tools/assets/fetch.mjs && node tools/assets/bake.mjs && node tools/assets/optimize.mjs && node tools/assets/sfx.mjs && node tools/assets/check-budget.mjs",
     "assets:check": "node tools/assets/check-budget.mjs"

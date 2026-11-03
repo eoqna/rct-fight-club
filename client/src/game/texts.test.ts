@@ -1,6 +1,6 @@
 import { CloseCode, JoinRejectStatus, MAX_CONNECTIONS_PER_IP } from '@fight-club/shared/protocol'
 import { describe, expect, it } from 'vitest'
-import { joinFailureText } from './texts.ts'
+import { MAINTENANCE_TEXT, disconnectText, joinFailureText } from './texts.ts'
 
 describe('입장 실패 안내 (P6-1)', () => {
   it('서버가 거절한 이유마다 무엇을 하면 되는지 알려 준다', () => {
@@ -9,5 +9,11 @@ describe('입장 실패 안내 (P6-1)', () => {
     expect(joinFailureText(JoinRejectStatus.Forbidden, '')).toContain('들어갈 수 없습니다')
     // 모르는 오류는 일반 안내에 내용을 덧붙인다
     expect(joinFailureText(undefined, 'ECONNREFUSED')).toBe('경기장에 들어가지 못했습니다. 잠시 뒤 다시 시도해 주세요. (ECONNREFUSED)')
+  })
+
+  it('서버 점검 중(종료 중 503, 다시 시작하는 동안 502·504)이면 점검 안내를 띄운다 (P7-2)', () => {
+    for (const status of [502, 503, 504]) expect(joinFailureText(status, '')).toBe(MAINTENANCE_TEXT)
+    expect(disconnectText(CloseCode.Maintenance)).toBe(MAINTENANCE_TEXT)
+    expect(disconnectText(4002)).toBe('서버와 연결이 끊어졌습니다 (코드 4002). 다시 입장해 주세요.')
   })
 })

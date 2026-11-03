@@ -1,6 +1,6 @@
 import { createHmac, randomBytes } from 'node:crypto'
 import type { IncomingMessage } from 'node:http'
-import { isIPv6 } from 'node:net'
+import { BlockList, isIP, isIPv6 } from 'node:net'
 
 /**
  * 앞문(gate.ts)이 요청마다 붙이는 내부 헤더 — 보낸 쪽 IP를 해시한 키. 클라이언트가 같은 이름으로 보낸 값은 덮어쓴다.
@@ -26,6 +26,24 @@ export function clientIp(req: IncomingMessage, trustProxy: number): string {
 
 export function isLoopback(ip: string): boolean {
   return ip === '::1' || ip.startsWith('127.')
+}
+
+/** 주소·대역 목록(IP_LIMIT_EXEMPT)에 드는지. 목록이 같으면 만든 것을 다시 쓴다 */
+let ranges: { list: string[]; blocks: BlockList } | null = null
+export function inRanges(ip: string, list: string[]): boolean {
+  if (list.length === 0) return false
+  if (ranges?.list !== list) {
+    const blocks = new BlockList()
+    for (const range of list) {
+      const [address, prefix] = range.split('/')
+      const type = isIP(address) === 6 ? 'ipv6' : 'ipv4'
+      if (prefix === undefined) blocks.addAddress(address, type)
+      else blocks.addSubnet(address, Number(prefix), type)
+    }
+    ranges = { list, blocks }
+  }
+  const family = isIP(ip)
+  return family !== 0 && ranges.blocks.check(ip, family === 6 ? 'ipv6' : 'ipv4')
 }
 
 /** 이 프로세스에서만 쓰는 비밀값 — 재시작하면 바뀐다. 서버 프로세스가 여럿이 되면(design §8.2) 환경 변수로 함께 나눠야 한다 */

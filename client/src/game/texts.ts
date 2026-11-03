@@ -20,6 +20,15 @@ export const CAUSE_TITLES: Record<ElimCause, string> = {
   afk: '자리를 비워 퇴장했습니다',
 }
 
+/** 서버 점검(배포·재시작) 중 — 경기 중에 끊겼을 때와 들어가지 못했을 때 */
+export const MAINTENANCE_TEXT = '서버를 점검하고 있습니다. 잠시 뒤 다시 들어와 주세요.'
+
+/** 경기 중에 서버와 연결이 끊겼을 때의 안내 */
+export function disconnectText(code: number): string {
+  if (code === CloseCode.Maintenance) return MAINTENANCE_TEXT
+  return `서버와 연결이 끊어졌습니다 (코드 ${code}). 다시 입장해 주세요.`
+}
+
 /** 경기장에 들어가지 못했을 때의 안내 — 서버가 거절한 이유별 (design §6.7). detail은 알 수 없는 오류일 때 덧붙인다 */
 export function joinFailureText(code: number | undefined, detail: string): string {
   switch (code) {
@@ -29,6 +38,11 @@ export function joinFailureText(code: number | undefined, detail: string): strin
       return '입장 시도가 너무 잦습니다. 1분쯤 뒤에 다시 시도해 주세요.'
     case JoinRejectStatus.Forbidden:
       return '이 페이지에서는 게임 서버에 들어갈 수 없습니다.'
+    // 서버가 종료 중(503)이거나 다시 시작하는 동안 Caddy가 돌려주는 응답(502·504)
+    case 502:
+    case 503:
+    case 504:
+      return MAINTENANCE_TEXT
     default:
       return `경기장에 들어가지 못했습니다. 잠시 뒤 다시 시도해 주세요. (${detail})`
   }

@@ -1,0 +1,55 @@
+# Fight Club 운영 구성 (design §8.1, P7-2) — 한 VM에서 Caddy(TLS·게임 화면) + 게임 서버.
+# 배포 스크립트가 릴리스 폴더(fight-club/releases/<커밋>/)에서 띄운다:
+#   RELEASE=<커밋> docker compose --env-file ../../.env up -d --build
+# 이미지에 커밋을 태그로 붙여 두므로, 되돌릴 때는 이전 릴리스 폴더에서 다시 띄우면 된다 (deploy/rollback.sh)
+name: fight-club
+
+services:
+  server:
+    build: ./server
+    image: fight-club-server:${RELEASE:?RELEASE가 필요합니다 (배포 스크립트가 정한다)}
+    restart: unless-stopped
+    # 신호를 제대로 받고 넘겨주는 작은 init (점검 안내 뒤 깔끔하게 끝나도록)
+    init: true
+    environment:
+      NODE_ENV: production
+      # Caddy 한 대 뒤 — X-Forwarded-For의 맨 오른쪽이 실제 접속 주소다 (design §6.7)
+      TRUST_PROXY: "1"
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:?.env에 ALLOWED_ORIGINS를 적어 주세요}
+      ADMIN_PASSWORD: ${ADMIN_PASSWORD:-}
+      LOG_LEVEL: ${LOG_LEVEL:-info}
+      IP_LIMIT_EXEMPT: ${IP_LIMIT_EXEMPT:-}
+    # 멈출 때 경기 중인 사람에게 10초 동안 점검을 알리고 끊는다 — 그동안 기다려 준다
+    stop_grace_period: 30s
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    logging: &logs
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+  web:
+    build: ./web
+    image: fight-club-web:${RELEASE:?RELEASE가 필요합니다 (배포 스크립트가 정한다)}
+    restart: unless-stopped
+    depends_on:
+      server:
+        condition: service_healthy
+    environment:
+      SITE: ${SITE:?.env에 SITE(도메인)를 적어 주세요}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-443}:443/udp"
+    volumes:
+      # 받은 인증서 — 릴리스가 바뀌어도 남는다
+      - caddy_data:/data
+      - caddy_config:/config
+    logging: *logs
+
+volumes:
+  caddy_data:
+  caddy_config:

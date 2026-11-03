@@ -3,7 +3,7 @@ import { CHARACTER_COUNT } from '@fight-club/shared/constants'
 import { randomNameIndex, type NameIndex } from '@fight-club/shared/nickname'
 import { CloseCode, PROTOCOL_VERSION, type JoinOptions, type ResultMsg } from '@fight-club/shared/protocol'
 import type { GameSession } from './game/session.ts'
-import { joinFailureText } from './game/texts.ts'
+import { disconnectText, joinFailureText } from './game/texts.ts'
 import { hasWebGL2 } from './scene/quality.ts'
 import { ResultScreen } from './screens/ResultScreen.tsx'
 import { SelectScreen } from './screens/SelectScreen.tsx'
@@ -83,7 +83,7 @@ function Game() {
           session.dispose()
           if (end.kind === 'eliminated') setScreen({ name: 'result', result: end.result })
           else if (end.kind === 'rejoin') setScreen({ name: 'connecting' })
-          else setScreen({ name: 'select', notice: `서버와 연결이 끊어졌습니다 (코드 ${end.code}). 다시 입장해 주세요.` })
+          else setScreen({ name: 'select', notice: disconnectText(end.code) })
         })
         setScreen({ name: 'playing', session })
       })

@@ -1,7 +1,7 @@
 import type { Room } from '@colyseus/core'
 import { ColyseusTestServer } from '@colyseus/testing'
 import {
-  CloseCode, JoinRejectStatus, MAX_CONNECTIONS_PER_IP, PROTOCOL_VERSION, ROOM_NAME, type JoinOptions,
+  CloseCode, JoinRejectStatus, MAX_CONNECTIONS_PER_IP, Msg, PROTOCOL_VERSION, ROOM_NAME, type JoinOptions, type MaintenanceMsg,
 } from '@fight-club/shared'
 import { randomBytes } from 'node:crypto'
 import http, { type IncomingHttpHeaders, type OutgoingHttpHeaders } from 'node:http'
@@ -223,6 +223,17 @@ describe('보안·운영 (P6)', () => {
       await expect.poll(() => open.size).toBe(0)
     })
 
+    it('부하 시험용으로 IP_LIMIT_EXEMPT에 넣은 주소·대역은 IP 제한을 받지 않는다', async () => {
+      config.ipLimitExempt = ['127.0.0.0/8']
+      const room = await colyseus.createRoom(ROOM_NAME)
+      for (let i = 0; i < MAX_CONNECTIONS_PER_IP + 2; i++) await join(room)
+      for (let i = 0; i < config.joinsPerMinute + 2; i++) expect((await matchmake()).status).toBe(200)
+      // 목록 밖 주소는 그대로 센다
+      config.trustProxy = 1
+      for (let i = 0; i < config.joinsPerMinute; i++) await matchmake({ 'x-forwarded-for': '198.51.100.20' })
+      expect((await matchmake({ 'x-forwarded-for': '198.51.100.20' })).status).toBe(JoinRejectStatus.TooManyRequests)
+    })
+
     it('개발 설정(루프백 제외)에서는 같은 컴퓨터의 탭이 몇 개든 들어온다', async () => {
       config.exemptLoopback = true
       const room = await colyseus.createRoom(ROOM_NAME)
@@ -304,6 +315,35 @@ describe('보안·운영 (P6)', () => {
       }
       const line = logs.events().find((e) => e.event === 'metrics') as unknown as Record<string, unknown>
       expect(line).toMatchObject({ online: 1, arenas: 1, tickMs: expect.any(Object), patchBytes: expect.any(Object), blocked: expect.any(Object) })
+      // CPU는 지표 로그를 켠 동안 잰다
+      expect((line.cpuPercent as { max: number }).max).toBeGreaterThan(0)
+    })
+  })
+
+  describe('배포 (P7-2)', () => {
+    it('서버를 멈출 때 경기 중인 사람에게 점검을 알리고, 정한 시간 뒤 4104로 끊는다', async () => {
+      config.shutdownNoticeMs = 1500
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const client = await join(room)
+      const notice = client.waitForMessage(Msg.Maintenance) as Promise<MaintenanceMsg>
+      const left = new Promise<number>((resolve) => client.onLeave((code) => resolve(code)))
+      const started = Date.now()
+      ;(room as unknown as { onBeforeShutdown(): void }).onBeforeShutdown()
+      expect(await notice).toEqual({ seconds: 2 })
+      expect(await left).toBe(CloseCode.Maintenance)
+      expect(Date.now() - started).toBeGreaterThanOrEqual(1400)
+    })
+
+    it('개발 설정에서는 안내 없이 바로 끊는다 (고칠 때마다 서버가 다시 시작되므로)', async () => {
+      config.shutdownNoticeMs = 0
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const client = await join(room)
+      let notified = false
+      client.onMessage(Msg.Maintenance, () => { notified = true })
+      const left = new Promise<number>((resolve) => client.onLeave((code) => resolve(code)))
+      ;(room as unknown as { onBeforeShutdown(): void }).onBeforeShutdown()
+      expect(await left).toBe(CloseCode.Maintenance)
+      expect(notified).toBe(false)
     })
   })
 

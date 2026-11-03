@@ -3,7 +3,8 @@ import {
   ARENA_CAPACITY, ATTACKS, Action, ArenaState, INTERP_DELAY_MS, Msg, PlayerInput, ROOM_NAME, SIM_FIELDS, TICK_RATE,
   activeBox, hitsBody, isGuarding, isHittable, rankEntries, stepPlayer,
   type Body, type DevDummyCommand, type DevDummyKind, type DevLatencyEvent, type ElimEvent, type GrabQuery,
-  type HitEvent, type HitQuery, type JoinOptions, type PlayerSim, type PlayerState, type ResultMsg, type StrikeId,
+  type HitEvent, type HitQuery, type JoinOptions, type MaintenanceMsg, type PlayerSim, type PlayerState, type ResultMsg,
+  type StrikeId,
 } from '@fight-club/shared'
 import { SEOI } from './animation.ts'
 import { SERVER_URL } from './config.ts'
@@ -145,6 +146,8 @@ export class GameSession {
   private confirmedHits = 0
   private latencyMs: number | null = null
   private disposed = false
+  /** 서버 점검으로 연결이 끊기는 시각 (performance.now 기준, 안내가 없으면 null) */
+  private maintenanceAt: number | null = null
   debugDraw = import.meta.env.DEV
 
   static async connect(options: JoinOptions): Promise<GameSession> {
@@ -184,6 +187,10 @@ export class GameSession {
     })
     // 결과 직후 서버가 연결을 끊는다(CloseCode.Eliminated). 결과가 오면 기다리지 않고 바로 끝낸다
     room.onMessage(Msg.Result, (result: ResultMsg) => this.finish({ kind: 'eliminated', result }))
+    // 서버 점검(배포·재시작): 몇 초 뒤 CloseCode.Maintenance로 끊긴다
+    room.onMessage(Msg.Maintenance, (notice: MaintenanceMsg) => {
+      this.maintenanceAt = performance.now() + notice.seconds * 1000
+    })
     room.onLeave((code) => this.finish({ kind: 'disconnected', code }))
     if (import.meta.env.DEV) {
       // 서버는 수신 지연을 입장할 때 묶고, SDK 시계는 RTT가 4배 넘게 뛰면 새 표본을 버린다.
@@ -191,6 +198,12 @@ export class GameSession {
       room.onMessage(Msg.DevLatency, () => this.finish({ kind: 'rejoin' }))
       void this.fetchLatency()
     }
+  }
+
+  /** 서버 점검으로 연결이 끊기기까지 남은 초 — 안내를 받지 않았으면 null */
+  maintenanceSecondsLeft(): number | null {
+    if (this.maintenanceAt === null) return null
+    return Math.max(0, Math.ceil((this.maintenanceAt - performance.now()) / 1000))
   }
 
   get myId(): string {

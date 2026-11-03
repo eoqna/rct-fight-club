@@ -15,6 +15,7 @@ export function Hud({ session }: { session: GameSession }) {
     <>
       <MyStatus session={session} />
       <ArenaInfo session={session} />
+      <MaintenanceBanner session={session} />
       <div className="hud-right">
         <KillFeed session={session} />
         <Leaderboard session={session} />
@@ -49,6 +50,17 @@ function ArenaInfo({ session }: { session: GameSession }) {
   return (
     <div className="hud-arena">
       경기장 #{arenaNo} · {humans}/{capacity} · {session.stats().rttMs}ms
+    </div>
+  )
+}
+
+/** 서버 점검(배포·재시작) 안내 — 몇 초 뒤 연결이 끊긴다 */
+function MaintenanceBanner({ session }: { session: GameSession }) {
+  const seconds = session.maintenanceSecondsLeft()
+  if (seconds === null) return null
+  return (
+    <div className="maintenance-banner" role="alert">
+      서버 점검으로 {seconds}초 뒤 연결이 끊깁니다. 잠시 뒤 다시 들어와 주세요.
     </div>
   )
 }
