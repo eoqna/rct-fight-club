@@ -62,7 +62,12 @@ export const GRAB = {
   reach: 0.8, radius: 0.4, height: 1.1,
   /** 잡은 뒤 방향 입력을 기다리는 시간. 지나면 바라보는 방향으로 던진다 */
   holdFrames: 36,
+  /** 쿨타임: 잡기를 시도한 뒤(헛잡아도) 다시 잡을 수 있을 때까지 5초 */
+  cooldown: 300,
 } as const
+
+/** 발차기 쿨타임: 발차기·날아차기를 시작한 뒤 다시 찰 수 있을 때까지 3초 (프레임). 달리며 D(돌진)는 발차기가 아니다 */
+export const KICK_COOLDOWN = 180
 
 /** 던지기: 던지는 동작 중 놓는 프레임, 놓은 뒤 후딜, 맞은 쪽 효과 — design §4.7 */
 export const THROW = {

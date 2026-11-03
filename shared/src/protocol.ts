@@ -1,10 +1,14 @@
 import type { StrikeId } from './attacks.ts'
+import type { NameIndex } from './nickname.ts'
 
 /** 경기장 방 이름 — 서버 `defineRoom`과 클라이언트 `joinOrCreate`가 함께 쓴다 */
 export const ROOM_NAME = 'arena'
 
 /** 게임 서버 기본 포트 */
 export const DEFAULT_PORT = 2567
+
+/** 프로토콜 버전 — 입장할 때 보내고, 서버와 다르면 4002로 거절한다 (클라이언트는 새로고침을 안내) */
+export const PROTOCOL_VERSION = 1
 
 /** 메시지 이름 */
 export const Msg = {
@@ -20,10 +24,28 @@ export const Msg = {
   DevDummy: 'dev:dummy',
 } as const
 
+/** 입장 요청 — design §5.3. 캐릭터·이름이 없거나 범위를 벗어나면 서버가 무작위로 정한다 */
+export interface JoinOptions {
+  /** PROTOCOL_VERSION */
+  v: number
+  characterId?: number
+  /** 이름은 인덱스만 보낸다. 문자열은 서버가 조립한다 (design §4.11) */
+  name?: NameIndex
+}
+
+/** GET /api/stats — 시작 화면의 접속자 수 (5초 캐시) */
+export interface StatsResponse {
+  /** 경기장에 들어와 있는 사람 수 (봇 제외) */
+  online: number
+  arenas: number
+}
+
 /** 서버가 연결을 끊을 때 쓰는 종료 코드 — design §5.8 */
 export const CloseCode = {
   /** 탈락 → 결과 화면 */
   Eliminated: 4001,
+  /** 클라이언트 버전이 서버와 다르다 → 새로고침 안내 */
+  VersionMismatch: 4002,
 } as const
 
 /** 명중 확정 — design §5.8 */
@@ -44,8 +66,10 @@ export type ElimCause = 'ko' | 'ringout' | 'selfout' | 'afk'
 export interface ElimEvent {
   tick: number
   victim: string
+  victimName: string
   /** 킬을 얻은 플레이어 (없으면 생략) */
   killer?: string
+  killerName?: string
   cause: ElimCause
 }
 
@@ -54,6 +78,9 @@ export interface ResultMsg {
   kills: number
   cause: ElimCause
   killer?: string
+  killerName?: string
+  /** 경기장에서 오른 최고 순위 (1부터) — FR-39 */
+  bestRank: number
 }
 
 export interface DevLatencyEvent {

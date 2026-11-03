@@ -4,11 +4,14 @@ interface Sample {
   t: number
   action: number
   actionFrame: number
+  stun: number
 }
 
 export interface ActionPose {
   action: number
   actionFrame: number
+  /** 그 동작의 경직 길이 (프레임) — 피격 동작을 경직 시간에 맞춰 재생한다 */
+  stun: number
 }
 
 const KEEP_MS = 1000
@@ -25,7 +28,7 @@ export class ActionTimeline {
     this.delayMs = delayMs
   }
 
-  record(id: string, action: number, actionFrame: number, now: number) {
+  record(id: string, action: number, actionFrame: number, stun: number, now: number) {
     let list = this.samples.get(id)
     if (!list) {
       list = []
@@ -33,7 +36,7 @@ export class ActionTimeline {
     }
     const last = list[list.length - 1]
     if (last && last.action === action && last.actionFrame === actionFrame) return
-    list.push({ t: now, action, actionFrame })
+    list.push({ t: now, action, actionFrame, stun })
     while (list.length > 2 && list[1].t < now - KEEP_MS) list.shift()
   }
 
@@ -47,6 +50,7 @@ export class ActionTimeline {
     const sample = list[i]
     out.action = sample.action
     out.actionFrame = sample.actionFrame + Math.max(0, target - sample.t) * (TICK_RATE / 1000)
+    out.stun = sample.stun
     return out
   }
 

@@ -1,11 +1,12 @@
+import type { Room } from '@colyseus/core'
 import { boot, type ColyseusTestServer } from '@colyseus/testing'
 import {
-  AFK_FRAMES, ARENA_HALF, Action, BODY_RADIUS, Btn, CloseCode, IDLE_INPUT, Msg, PlayerInput, ROOM_NAME, SIM_FIELDS, SPAWN_INVULN_FRAMES,
-  TICK_RATE, WALK_SPEED, stepPlayer,
-  type ElimEvent, type HitEvent, type PlayerSim, type PlayerState, type ResultMsg,
+  AFK_FRAMES, ARENA_CAPACITY, ARENA_HALF, Action, BODY_RADIUS, Btn, CHARACTER_COUNT, CloseCode, IDLE_INPUT, Msg, PROTOCOL_VERSION,
+  PlayerInput, ROOM_NAME, SIM_FIELDS, SPAWN_INVULN_FRAMES, TICK_RATE, VARIANT_COUNT, WALK_SPEED, assembleName, stepPlayer,
+  type ElimEvent, type HitEvent, type JoinOptions, type PlayerSim, type PlayerState, type ResultMsg,
 } from '@fight-club/shared'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
-import { server } from '../src/app.ts'
+import { server, statsCache } from '../src/app.ts'
 import { ArenaRoom } from '../src/rooms/ArenaRoom.ts'
 
 const DT = 1 / TICK_RATE
@@ -45,6 +46,7 @@ async function sendTogether(room: TickingRoom, count: number, senders: [InputSen
 function place(p: PlayerState, x: number, z: number, fx = 0, fz = 1) {
   Object.assign(p, {
     x, y: 0, z, vx: 0, vy: 0, vz: 0, fx, fz, action: Action.Idle, actionFrame: 0, stun: 0, buffered: 0, invuln: 0,
+    kickCooldown: 0, grabCooldown: 0,
   })
 }
 
@@ -62,9 +64,14 @@ describe('게임 서버', () => {
 
   beforeAll(async () => {
     colyseus = await boot(server)
+    statsCache.ttlMs = 0
   })
   afterAll(() => colyseus.shutdown())
   beforeEach(() => colyseus.cleanup())
+
+  /** 입장 — 프로토콜 버전을 함께 보낸다 */
+  const join = <R extends Room>(room: R, options: Partial<JoinOptions> = {}) =>
+    colyseus.connectTo(room, { v: PROTOCOL_VERSION, ...options })
 
   it('헬스 체크에 응답한다', async () => {
     const res = await colyseus.http.get('/healthz')
@@ -73,7 +80,7 @@ describe('게임 서버', () => {
 
   it('입장한 클라이언트가 서버 틱을 계속 동기화받는다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     await client.waitForInitialState()
     const firstTick = client.state.tick
 
@@ -86,7 +93,7 @@ describe('게임 서버', () => {
 
   it('입장하면 플레이어가 생기고 나가면 사라진다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     expect(room.state.players.get(client.sessionId)?.hp).toBe(100)
 
     await client.leave()
@@ -94,12 +101,90 @@ describe('게임 서버', () => {
     expect(room.state.players.has(client.sessionId)).toBe(false)
   })
 
+  describe('입장·매치메이킹', () => {
+    it('프로토콜 버전이 다르거나 없으면 4002로 거절한다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      await join(room) // 빈 방은 거절 뒤 바로 닫히므로 한 명을 둔다
+      await expect(colyseus.connectTo(room, { v: PROTOCOL_VERSION + 1 })).rejects.toMatchObject({ code: CloseCode.VersionMismatch })
+      await expect(colyseus.connectTo(room, {})).rejects.toMatchObject({ code: CloseCode.VersionMismatch })
+      expect(room.state.players.size).toBe(1)
+    })
+
+    it('이름은 받은 인덱스로 서버가 조립하고, 같은 경기장에 같은 이름이 있으면 다시 뽑는다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const first = await join(room, { name: [0, 0, 0] })
+      const second = await join(room, { name: [0, 0, 0] })
+      const invalid = await join(room, { name: ['<b>x</b>', 0, 0] as unknown as JoinOptions['name'] })
+      const [a, b, c] = [first, second, invalid].map((client) => room.state.players.get(client.sessionId)!.name)
+      expect(a).toBe(assembleName([0, 0, 0]))
+      expect(b).not.toBe(a)
+      expect(b.startsWith('조용한 태양')).toBe(true) // 어미구만 다시 뽑는다
+      expect(c).not.toContain('<')
+      expect(c.length).toBeGreaterThan(0)
+    })
+
+    it('정원 16명이 차면 17번째는 새 경기장에 들어가고, 경기장 번호는 #1·#2 순이다', async () => {
+      const first = []
+      for (let i = 0; i < ARENA_CAPACITY; i++) first.push(await colyseus.sdk.joinOrCreate(ROOM_NAME, { v: PROTOCOL_VERSION }))
+      expect(new Set(first.map((r) => r.roomId)).size).toBe(1)
+      const seventeenth = await colyseus.sdk.joinOrCreate(ROOM_NAME, { v: PROTOCOL_VERSION })
+      expect(seventeenth.roomId).not.toBe(first[0].roomId)
+      expect(colyseus.getRoomById<ArenaRoom>(first[0].roomId).state.arenaNo).toBe(1)
+      expect(colyseus.getRoomById<ArenaRoom>(seventeenth.roomId).state.arenaNo).toBe(2)
+    })
+
+    it('빈자리가 있는 경기장 중 사람이 가장 많은 곳에 넣는다', async () => {
+      const small = await colyseus.createRoom(ROOM_NAME)
+      const big = await colyseus.createRoom(ROOM_NAME)
+      await join(small)
+      for (let i = 0; i < 3; i++) await join(big)
+      const joined = await colyseus.sdk.joinOrCreate(ROOM_NAME, { v: PROTOCOL_VERSION })
+      expect(joined.roomId).toBe(big.roomId)
+    })
+
+    it('/api/stats: 경기장에 들어온 사람 수와 경기장 수', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      await join(room)
+      await join(room)
+      await colyseus.createRoom(ROOM_NAME)
+      const res = await colyseus.http.get('/api/stats')
+      expect(res.data).toEqual({ online: 2, arenas: 2 })
+    })
+  })
+
+  it('고른 캐릭터로 입장하고, 같은 캐릭터끼리는 가장 적게 쓰인 색상 변형을 받는다', async () => {
+    const room = await colyseus.createRoom(ROOM_NAME)
+    const looks: [number, number][] = []
+    for (let i = 0; i < VARIANT_COUNT + 1; i++) {
+      const client = await join(room, { characterId: 2 })
+      const p = room.state.players.get(client.sessionId)!
+      looks.push([p.characterId, p.variant])
+    }
+    const other = await join(room, { characterId: 4 })
+
+    expect(looks).toEqual([[2, 0], [2, 1], [2, 2], [2, 3], [2, 0]])
+    expect(room.state.players.get(other.sessionId)?.variant).toBe(0)
+  })
+
+  it.each([
+    ['고르지 않으면', {}],
+    ['범위를 벗어나면', { characterId: CHARACTER_COUNT }],
+    ['정수가 아니면', { characterId: 1.5 }],
+  ])('캐릭터를 %s 무작위로 정한다', async (_label, options) => {
+    const room = await colyseus.createRoom(ROOM_NAME)
+    const client = await join(room, options)
+    const p = room.state.players.get(client.sessionId)!
+    expect(Number.isInteger(p.characterId)).toBe(true)
+    expect(p.characterId).toBeGreaterThanOrEqual(0)
+    expect(p.characterId).toBeLessThan(CHARACTER_COUNT)
+  })
+
   it.each([
     ['일정하게 도착하면', 0],
     ['가끔 3틱씩 늦게 도착해도', 5],
   ])('입력이 %s 공용 시뮬레이션과 똑같이 움직인다', async (_label, jitterEvery) => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     await client.waitForInitialState()
     const player = room.state.players.get(client.sessionId)!
     const expected = copySim(player)
@@ -116,7 +201,7 @@ describe('게임 서버', () => {
 
   it('입력을 실제보다 빨리 보내도 캐릭터가 빨라지지 않는다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     await client.waitForInitialState()
     const player = room.state.players.get(client.sessionId)!
     place(player, -10, 0)
@@ -138,7 +223,7 @@ describe('게임 서버', () => {
 
   it('입력이 끊겨도 서버는 시뮬레이션을 계속 진행한다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     await client.waitForInitialState()
     const player = room.state.players.get(client.sessionId)!
 
@@ -155,8 +240,8 @@ describe('게임 서버', () => {
 
   it('다른 플레이어를 통과하지 못하고 맞닿은 자리에서 멈춘다. 서 있는 쪽은 밀리지 않는다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const walker = await colyseus.connectTo(room)
-    const blocker = await colyseus.connectTo(room)
+    const walker = await join(room)
+    const blocker = await join(room)
     const a = room.state.players.get(walker.sessionId)!
     const b = room.state.players.get(blocker.sessionId)!
     place(a, 0, 0)
@@ -171,8 +256,8 @@ describe('게임 서버', () => {
 
   it('잽은 바로 앞 상대를 맞히고 공격자 반대쪽으로 밀어낸다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const attacker = await colyseus.connectTo(room)
-    const victim = await colyseus.connectTo(room)
+    const attacker = await join(room)
+    const victim = await join(room)
     const a = room.state.players.get(attacker.sessionId)!
     const b = room.state.players.get(victim.sessionId)!
     place(a, 0, 0)
@@ -194,7 +279,7 @@ describe('게임 서버', () => {
 
   it('개발용 샌드백은 요청한 플레이어 앞에 서고, 치우면 사라진다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     await client.waitForInitialState()
     place(room.state.players.get(client.sessionId)!, 0, 0)
 
@@ -211,7 +296,7 @@ describe('게임 서버', () => {
 
   it('움직이는 샌드백은 제자리를 중심으로 좌우로 왕복한다', async () => {
     const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await colyseus.connectTo(room)
+    const client = await join(room)
     await client.waitForInitialState()
     place(room.state.players.get(client.sessionId)!, 0, 0)
 
@@ -241,8 +326,8 @@ describe('게임 서버', () => {
     /** 두 명을 마주 보게 세운다: 공격자 (0,0)는 +z, 상대 (0,1)는 지정한 방향 */
     async function duel(fx = 0, fz = -1) {
       const room = await colyseus.createRoom(ROOM_NAME)
-      const attacker = await colyseus.connectTo(room)
-      const defender = await colyseus.connectTo(room)
+      const attacker = await join(room)
+      const defender = await join(room)
       const a = room.state.players.get(attacker.sessionId)!
       const b = room.state.players.get(defender.sessionId)!
       place(a, 0, 0)
@@ -254,8 +339,8 @@ describe('게임 서버', () => {
 
     it('입장하면 3초 무적이고, 먼저 온 플레이어와 떨어진 곳에 선다', async () => {
       const room = await colyseus.createRoom(ROOM_NAME)
-      const first = await colyseus.connectTo(room)
-      const second = await colyseus.connectTo(room)
+      const first = await join(room)
+      const second = await join(room)
       const a = room.state.players.get(first.sessionId)!
       const b = room.state.players.get(second.sessionId)!
       expect(b.invuln).toBeGreaterThan(SPAWN_INVULN_FRAMES - 30)
@@ -285,8 +370,8 @@ describe('게임 서버', () => {
 
     it('조준 보정: 비스듬히 선 상대 쪽으로 돌아 맞히고, 클라이언트가 예측한 방향과 똑같이 돈다', async () => {
       const room = await colyseus.createRoom(ROOM_NAME)
-      const attacker = await colyseus.connectTo(room)
-      const victim = await colyseus.connectTo(room)
+      const attacker = await join(room)
+      const victim = await join(room)
       const a = room.state.players.get(attacker.sessionId)!
       // 정면에서 약 40° 비껴 선 상대 — 보정이 없으면 잽이 빗나간다
       place(a, 0, 0)
@@ -334,7 +419,7 @@ describe('게임 서버', () => {
 
     it('잡기: 잡은 쪽이 다른 사람에게 맞으면 잡기가 풀린다', async () => {
       const { room, attacker, a, b } = await duel()
-      const third = await colyseus.connectTo(room)
+      const third = await join(room)
       place(room.state.players.get(third.sessionId)!, -1, 0, 1, 0)
       await waitTicks(room, 30)
 
@@ -355,15 +440,18 @@ describe('게임 서버', () => {
     })
 
     it('KO: HP가 0이 되면 1초 뒤 탈락하고, 결과를 받은 뒤 연결이 끊기며, 때린 사람이 킬을 얻는다', async () => {
-      const { room, attacker, defender, a } = await duel()
+      const { room, attacker, defender, a, b } = await duel()
       room.state.players.get(defender.sessionId)!.hp = 5
+      const names = { victimName: b.name, killerName: a.name }
       const elim = attacker.waitForMessage(Msg.Elim) as Promise<ElimEvent>
       const result = defender.waitForMessage(Msg.Result) as Promise<ResultMsg>
       const closed = leaveCode(defender)
 
       await sendEachTick(room, attacker.input({ type: PlayerInput, mode: 'reliable' }), 11, press(Btn.PunchL))
-      expect(await elim).toMatchObject({ victim: defender.sessionId, killer: attacker.sessionId, cause: 'ko' })
-      expect(await result).toMatchObject({ cause: 'ko', killer: attacker.sessionId, kills: 0 })
+      // 탈락한 사람은 상태에서 사라지므로 이름이 함께 온다 (킬 피드)
+      expect(await elim).toMatchObject({ victim: defender.sessionId, killer: attacker.sessionId, cause: 'ko', ...names })
+      // 나중에 들어온 0킬이라 최고 순위는 2위
+      expect(await result).toMatchObject({ cause: 'ko', killer: attacker.sessionId, killerName: names.killerName, kills: 0, bestRank: 2 })
       expect(await closed).toBe(CloseCode.Eliminated)
       expect(a.kills).toBe(1)
       expect(room.state.players.has(defender.sessionId)).toBe(false)
@@ -383,7 +471,7 @@ describe('게임 서버', () => {
 
     it('자멸: 혼자 걸어 나가 떨어지면 킬 없이 탈락한다', async () => {
       const room = await colyseus.createRoom(ROOM_NAME)
-      const client = await colyseus.connectTo(room)
+      const client = await join(room)
       place(room.state.players.get(client.sessionId)!, 11.5, 0, 1, 0)
       const result = client.waitForMessage(Msg.Result) as Promise<ResultMsg>
       await sendEachTick(room, client.input({ type: PlayerInput, mode: 'reliable' }), 20, (data) => { data.mx = 127 })
@@ -396,7 +484,7 @@ describe('게임 서버', () => {
       await colyseus.http.post('/dev/latency?ms=200')
       try {
         const room = await colyseus.createRoom(ROOM_NAME)
-        const client = await colyseus.connectTo(room)
+        const client = await join(room)
         let result: ResultMsg | undefined
         client.onMessage(Msg.Result, (message: ResultMsg) => { result = message })
         const closed = leaveCode(client)
@@ -412,7 +500,7 @@ describe('게임 서버', () => {
       ArenaRoom.afkFrames = 30
       try {
         const room = await colyseus.createRoom(ROOM_NAME)
-        const client = await colyseus.connectTo(room)
+        const client = await join(room)
         const result = client.waitForMessage(Msg.Result) as Promise<ResultMsg>
         const received = await result
         expect(received).toMatchObject({ cause: 'afk', kills: 0 })

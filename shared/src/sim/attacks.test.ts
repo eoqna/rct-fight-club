@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { Action, Btn } from '../actions.ts'
-import { ATTACKS, DASH_DISTANCE, type AttackDef } from '../attacks.ts'
+import { ATTACKS, DASH_DISTANCE, GRAB, KICK_COOLDOWN, type AttackDef } from '../attacks.ts'
 import { TICK_RATE } from '../constants.ts'
 import { makePlayer } from './fixtures.ts'
 import { IDLE_INPUT, stepPlayer, type Body, type InputLike, type StepEvent } from './player.ts'
@@ -39,6 +39,12 @@ describe('지상 공격', () => {
       stepPlayer(p, press(bits), DT)
       expect(p.action).toBe(action)
     }
+  })
+
+  it('오른손(S, 특수)은 왼손(A, 기본)보다 피해가 조금 더 크고, 대신 선딜·후딜이 길다 (사용자 요청 2026-11-03)', () => {
+    expect(ATTACKS.straight.damage).toBeGreaterThan(ATTACKS.jab.damage)
+    expect(ATTACKS.straight.startup).toBeGreaterThan(ATTACKS.jab.startup)
+    expect(ATTACKS.straight.recovery).toBeGreaterThan(ATTACKS.jab.recovery)
   })
 })
 
@@ -105,6 +111,88 @@ describe('선입력', () => {
     stepPlayer(p, press(Btn.Kick), DT)
     for (let frame = 11; frame <= total; frame++) stepPlayer(p, IDLE_INPUT, DT)
     expect(p.action).toBe(Action.Idle)
+  })
+})
+
+describe('쿨타임', () => {
+  /** 동작이 끝날 때까지 빈 입력으로 진행한다 */
+  const finishAction = (p: ReturnType<typeof makePlayer>) => {
+    for (let i = 0; i < 120 && p.action !== Action.Idle; i++) stepPlayer(p, IDLE_INPUT, DT)
+  }
+  /** 조건이 맞을 때까지 빈 입력으로 진행한다 */
+  const wait = (p: ReturnType<typeof makePlayer>, until: (p: ReturnType<typeof makePlayer>) => boolean) => {
+    for (let i = 0; i < 1000 && !until(p); i++) stepPlayer(p, IDLE_INPUT, DT)
+  }
+
+  it('발차기는 시작하고 3초(180프레임) 동안 다시 찰 수 없다', () => {
+    const p = makePlayer()
+    stepPlayer(p, press(Btn.Kick), DT)
+    expect(p.kickCooldown).toBe(KICK_COOLDOWN)
+    finishAction(p)
+    stepPlayer(p, press(Btn.Kick), DT)
+    expect(p.action).toBe(Action.Idle)
+
+    // 처음 찬 스텝부터 정확히 180스텝째에 다시 찰 수 있다
+    const p2 = makePlayer()
+    stepPlayer(p2, press(Btn.Kick), DT)
+    for (let i = 1; i < KICK_COOLDOWN; i++) stepPlayer(p2, IDLE_INPUT, DT)
+    expect(p2.kickCooldown).toBe(1)
+    stepPlayer(p2, press(Btn.Kick), DT)
+    expect(p2.action).toBe(Action.Kick)
+  })
+
+  it('날아차기도 발차기 쿨타임을 같이 쓴다 — 점프로 쿨타임을 피할 수 없다', () => {
+    const p = makePlayer()
+    stepPlayer(p, press(Btn.Kick), DT)
+    finishAction(p)
+    stepPlayer(p, press(Btn.Jump), DT)
+    stepPlayer(p, press(Btn.Kick), DT)
+    expect(p.action).toBe(Action.Air)
+
+    const q = makePlayer()
+    stepPlayer(q, press(Btn.Jump), DT)
+    stepPlayer(q, press(Btn.Kick), DT)
+    expect(q.action).toBe(Action.FlyingKick)
+    wait(q, (x) => x.action === Action.Idle)
+    stepPlayer(q, press(Btn.Kick), DT)
+    expect(q.action).toBe(Action.Idle)
+  })
+
+  it('쿨타임 중에 함께 누른 다른 공격은 나가고, 달리며 D(돌진)는 막지 않는다', () => {
+    const p = makePlayer()
+    stepPlayer(p, press(Btn.Kick), DT)
+    finishAction(p)
+    stepPlayer(p, press(Btn.Kick | Btn.PunchR), DT)
+    expect(p.action).toBe(Action.Straight)
+
+    const q = makePlayer({ kickCooldown: KICK_COOLDOWN })
+    for (let i = 0; i < 20; i++) stepPlayer(q, RUN_RIGHT, DT)
+    stepPlayer(q, press(Btn.Kick, RUN_RIGHT), DT)
+    expect(q.action).toBe(Action.Dash)
+  })
+
+  it('쿨타임 중인 발차기는 선입력되지 않는다', () => {
+    const p = makePlayer({ kickCooldown: KICK_COOLDOWN })
+    const total = ATTACKS.jab.startup + ATTACKS.jab.active + ATTACKS.jab.recovery
+    stepPlayer(p, press(Btn.PunchL), DT)
+    for (let frame = 1; frame < total - 3; frame++) stepPlayer(p, IDLE_INPUT, DT)
+    stepPlayer(p, press(Btn.Kick), DT)
+    for (let i = 0; i < 4; i++) stepPlayer(p, IDLE_INPUT, DT)
+    expect(p.action).toBe(Action.Idle)
+  })
+
+  it('잡기는 헛잡아도 5초(300프레임) 동안 다시 잡을 수 없다', () => {
+    const p = makePlayer()
+    stepPlayer(p, press(Btn.Grab), DT)
+    expect(p.action).toBe(Action.GrabTry)
+    expect(p.grabCooldown).toBe(GRAB.cooldown)
+    finishAction(p)
+    stepPlayer(p, press(Btn.Grab), DT)
+    expect(p.action).toBe(Action.Idle)
+
+    wait(p, (x) => x.grabCooldown === 1)
+    stepPlayer(p, press(Btn.Grab), DT)
+    expect(p.action).toBe(Action.GrabTry)
   })
 })
 

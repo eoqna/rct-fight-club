@@ -1,6 +1,7 @@
 import { useEffect, useState, type MouseEvent } from 'react'
 import type { DevDummyKind } from '@fight-club/shared'
 import type { GameSession } from '../game/session.ts'
+import { renderStats } from '../scene/quality.ts'
 import { useTicker } from './useTicker.ts'
 
 /** CP1 체감 시험에 쓰는 왕복 지연 (ms) */
@@ -46,6 +47,8 @@ export function DebugOverlay({ session }: { session: GameSession }) {
     <aside className="debug" aria-label="넷코드 디버그">
       <h2>넷코드 디버그</h2>
       <dl>
+        <dt>화면</dt>
+        <dd>{Math.round(renderStats.fps)}fps · 배율 {renderStats.dpr} ({renderStats.tier === 'pc' ? 'PC' : '모바일'})</dd>
         <dt>RTT</dt>
         <dd>{stats.rttMs}ms · 지터 {stats.jitterMs}ms</dd>
         <dt>확인 대기 입력</dt>

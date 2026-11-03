@@ -1,5 +1,5 @@
 import { Action, Btn } from '../actions.ts'
-import { ATTACKS, DASH_DISTANCE, GRAB, THROW, type AttackId } from '../attacks.ts'
+import { ATTACKS, DASH_DISTANCE, GRAB, KICK_COOLDOWN, THROW, type AttackId } from '../attacks.ts'
 import {
   AIM_ASSIST_COS, AIM_ASSIST_RANGE, AIR_ACCEL, ARENA_HALF, BODY_HEIGHT, BODY_RADIUS, GETUP_INVULN_FRAMES, GRAVITY,
   INPUT_BUFFER_FRAMES, JUMP_SPEED, KNOCKBACK_DECEL, KNOCKDOWN_FRAMES, MOVE_ACCEL, RUN_SPEED, WALK_SPEED,
@@ -25,6 +25,10 @@ export interface PlayerSim {
   buffered: number
   /** 남은 무적 프레임 */
   invuln: number
+  /** 다시 찰 수 있을 때까지 남은 프레임 (발차기·날아차기) */
+  kickCooldown: number
+  /** 다시 잡을 수 있을 때까지 남은 프레임 */
+  grabCooldown: number
 }
 
 /** 한 스텝의 입력. 이동은 -127..127, 화면 기준 → 가 +x, ↓ 가 +z */
@@ -108,6 +112,8 @@ export function isInsideArena(x: number, z: number): boolean {
 export function stepPlayer(p: PlayerSim, input: InputLike, dt: number, env: StepEnv = {}): StepEvent | null {
   const grounded = p.y === 0 && isInsideArena(p.x, p.z)
   if (p.invuln > 0) p.invuln--
+  if (p.kickCooldown > 0) p.kickCooldown--
+  if (p.grabCooldown > 0) p.grabCooldown--
   let event: StepEvent | null = null
 
   switch (p.action) {
@@ -236,7 +242,7 @@ function control(p: PlayerSim, input: InputLike, grounded: boolean, dt: number, 
     return
   }
 
-  const next = pickAction(input.pressed, grounded, p.action === Action.Run)
+  const next = pickAction(p, input.pressed, grounded, p.action === Action.Run)
   if (next) {
     startAction(p, next, grounded, dt, env)
     return
@@ -262,11 +268,15 @@ function control(p: PlayerSim, input: InputLike, grounded: boolean, dt: number, 
 
 /**
  * 누른 버튼으로 시작할 행동. 여러 개면 잡기 > 발차기 > 오른손 > 왼손 순 — design §4.4
- * 달리는 중 공격은 돌진, 공중 발차기는 날아차기. 공중에서는 잡을 수 없다
+ * 달리는 중 공격은 돌진, 공중 발차기는 날아차기. 공중에서는 잡을 수 없다.
+ * 쿨타임 중인 잡기·발차기는 없는 것으로 보고 다음 순서로 넘어간다
  */
-function pickAction(pressed: number, grounded: boolean, running: boolean): number {
-  if (pressed & Btn.Grab && grounded) return Action.GrabTry
-  if (pressed & Btn.Kick) return !grounded ? Action.FlyingKick : running ? Action.Dash : Action.Kick
+function pickAction(p: PlayerSim, pressed: number, grounded: boolean, running: boolean): number {
+  if (pressed & Btn.Grab && grounded && p.grabCooldown === 0) return Action.GrabTry
+  if (pressed & Btn.Kick) {
+    if (grounded && running) return Action.Dash
+    if (p.kickCooldown === 0) return grounded ? Action.Kick : Action.FlyingKick
+  }
   if (pressed & Btn.PunchR) return grounded && running ? Action.Dash : Action.Straight
   if (pressed & Btn.PunchL) return grounded && running ? Action.Dash : Action.Jab
   return 0
@@ -279,6 +289,8 @@ function startAction(p: PlayerSim, action: number, grounded: boolean, dt: number
   p.buffered = 0
   // 공격·잡기를 하면 무적이 풀린다 — design §4.8
   p.invuln = 0
+  if (action === Action.Kick || action === Action.FlyingKick) p.kickCooldown = KICK_COOLDOWN
+  if (action === Action.GrabTry) p.grabCooldown = GRAB.cooldown
   aimAtNearest(p, env)
   if (action === Action.Dash) {
     const speed = dashSpeed(dt)
@@ -308,7 +320,7 @@ function stepAttack(p: PlayerSim, input: InputLike, grounded: boolean, dt: numbe
 /** 후딜 마지막 몇 프레임 안에 누른 공격·잡기를 기억해 둔다 */
 function bufferAction(p: PlayerSim, input: InputLike, remaining: number) {
   if (remaining <= 0 || remaining > INPUT_BUFFER_FRAMES || !input.pressed) return
-  const next = pickAction(input.pressed, true, false)
+  const next = pickAction(p, input.pressed, true, false)
   if (next) p.buffered = next
 }
 

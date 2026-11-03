@@ -1,6 +1,6 @@
 import { defineRoom, defineServer } from '@colyseus/core'
-import { Msg, ROOM_NAME, type DevLatencyEvent } from '@fight-club/shared'
-import { ArenaRoom, notifyAllArenas } from './rooms/ArenaRoom.ts'
+import { Msg, ROOM_NAME, type DevLatencyEvent, type StatsResponse } from '@fight-club/shared'
+import { ArenaRoom, arenaStats, notifyAllArenas } from './rooms/ArenaRoom.ts'
 
 /** 개발용 지연 주입의 상한 (ms, 왕복) */
 const MAX_SIMULATED_LATENCY_MS = 1000
@@ -10,6 +10,9 @@ const CLOSE_MARGIN_MS = 50
 
 /** 지금 주입된 왕복 지연 (ms) */
 let simulatedLatencyMs = 0
+
+/** /api/stats 응답을 이만큼 재사용한다 (ms) — design §6.8. 테스트에서 줄일 수 있다 */
+export const statsCache = { ttlMs: 5000, at: -Infinity, value: { online: 0, arenas: 0 } as StatsResponse }
 
 /**
  * Colyseus의 지연 흉내는 보내는 메시지만 편도(왕복의 절반)만큼 늦추고 연결 종료는 바로 한다.
@@ -25,11 +28,23 @@ trackLatency(Number(process.env.COLYSEUS_LATENCY) || 0)
 
 export const server = defineServer({
   rooms: {
-    [ROOM_NAME]: defineRoom(ArenaRoom),
+    // 빈자리가 있는 경기장 중 사람이 가장 많은 곳에 넣는다. 모두 차면(정원 16) 새로 연다 (design §6.1, FR-03·04)
+    [ROOM_NAME]: defineRoom(ArenaRoom).sortBy({ clients: -1 }),
   },
   express: (app) => {
     app.get('/healthz', (_req, res) => {
       res.send('ok')
+    })
+
+    // 시작 화면의 접속자 수 (FR-02). 공개 정보라 어느 출처에서나 읽게 한다
+    app.get('/api/stats', (_req, res) => {
+      const now = Date.now()
+      if (now - statsCache.at >= statsCache.ttlMs) {
+        statsCache.value = arenaStats()
+        statsCache.at = now
+      }
+      res.set('Access-Control-Allow-Origin', '*')
+      res.json(statsCache.value)
     })
 
     if (process.env.NODE_ENV !== 'production') {

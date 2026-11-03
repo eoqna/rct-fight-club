@@ -13,16 +13,26 @@
     "build": "npm run build --workspaces --if-present",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "lint": "eslint .",
-    "test": "vitest run"
+    "test": "vitest run",
+    "test:e2e": "playwright test",
+    "assets:fetch": "node tools/assets/fetch.mjs",
+    "assets:build": "node tools/assets/fetch.mjs && node tools/assets/bake.mjs && node tools/assets/optimize.mjs && node tools/assets/sfx.mjs && node tools/assets/check-budget.mjs",
+    "assets:check": "node tools/assets/check-budget.mjs"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
+    "@gltf-transform/core": "^4.5.1",
+    "@gltf-transform/extensions": "^4.5.1",
+    "@gltf-transform/functions": "^4.5.1",
+    "@playwright/test": "^1.64.1",
     "@types/node": "^24.19.2",
     "concurrently": "^10.0.6",
     "eslint": "^10.13.0",
     "eslint-plugin-react-hooks": "^7.1.1",
     "eslint-plugin-react-refresh": "^0.5.7",
     "globals": "^17.13.0",
+    "meshoptimizer": "^1.3.0",
+    "playwright-core": "^1.64.1",
     "typescript": "~6.0.3",
     "typescript-eslint": "^8.72.0",
     "vitest": "^5.0.5"

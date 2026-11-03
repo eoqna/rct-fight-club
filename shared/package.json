@@ -4,7 +4,10 @@
   "version": "0.0.0",
   "type": "module",
   "exports": {
-    ".": "./src/index.ts"
+    ".": "./src/index.ts",
+    "./constants": "./src/constants.ts",
+    "./nickname": "./src/nickname.ts",
+    "./protocol": "./src/protocol.ts"
   },
   "scripts": {
     "typecheck": "tsc -p ."

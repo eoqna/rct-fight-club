@@ -10,6 +10,16 @@ export const INTERP_DELAY_MS = 100
 /** 랙 보상 최대 되감기 (ms) — design §5.2 */
 export const MAX_REWIND_MS = 300
 
+// 캐릭터 — FR-06·08, design §6.6
+/** 프리셋 캐릭터 수. 번호(characterId)는 client/src/game/assets.gen.ts의 CHARACTER_MODELS 순서다 */
+export const CHARACTER_COUNT = 5
+/** 같은 캐릭터를 고른 사람끼리 구분하는 색상 변형 수 (0 = 원래 색) */
+export const VARIANT_COUNT = 4
+
+// 경기장 — design §6.1
+/** 경기장 정원 (사람). 차면 새 경기장을 만든다 (FR-03·04) */
+export const ARENA_CAPACITY = 16
+
 // 경기장·몸 (m) — design §4.3
 export const ARENA_HALF = 12
 export const BODY_RADIUS = 0.4

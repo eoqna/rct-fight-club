@@ -1,11 +1,12 @@
-import { Room, type Client, type Rewind, type RewindView, type StepContext } from '@colyseus/core'
+import { Room, ServerError, type Client, type Rewind, type RewindView, type StepContext } from '@colyseus/core'
 import {
-  AFK_FRAMES, ALL_BUTTONS, ARENA_HALF, ATTACKS, Action, ArenaState, BODY_RADIUS, COMBO_KNOCKDOWN_HITS,
-  COMBO_WINDOW_FRAMES, CloseCode, FALL_OUT_Y, IDLE_INPUT, KO_FRAMES, MAX_HP, MAX_REWIND_MS, Msg, OUT_OF_BOUNDS,
-  PATCH_RATE, PlayerInput, PlayerState, RINGOUT_CREDIT_FRAMES, SPAWN_INVULN_FRAMES, TICK_RATE,
-  applyHit, applyThrow, hitsBody, isGrabbable, isGuarding, isHittable, stepPlayer,
+  AFK_FRAMES, ALL_BUTTONS, ARENA_CAPACITY, ARENA_HALF, ATTACKS, Action, ArenaState, BODY_RADIUS, CHARACTER_COUNT,
+  COMBO_KNOCKDOWN_HITS, COMBO_WINDOW_FRAMES, CloseCode, FALL_OUT_Y, IDLE_INPUT, KO_FRAMES, MAX_HP, MAX_REWIND_MS, Msg,
+  OUT_OF_BOUNDS, PATCH_RATE, PROTOCOL_VERSION, PlayerInput, PlayerState, RINGOUT_CREDIT_FRAMES, SPAWN_INVULN_FRAMES,
+  TICK_RATE, VARIANT_COUNT, applyHit, applyThrow, hitsBody, isGrabbable, isGuarding, isHittable, isNameIndex,
+  randomNameIndex, rankEntries, stepPlayer, uniqueName,
   type AttackId, type Body, type DevDummyCommand, type ElimCause, type ElimEvent, type HitEvent, type InputLike,
-  type ResultMsg, type StrikeId,
+  type JoinOptions, type ResultMsg, type StatsResponse, type StrikeId,
 } from '@fight-club/shared'
 
 /**
@@ -69,6 +70,13 @@ export function notifyAllArenas(type: string, message: unknown) {
   for (const arena of arenas) arena.broadcast(type, message)
 }
 
+/** 이 프로세스의 접속자·경기장 수 (봇은 클라이언트가 아니므로 세지 않는다) — /api/stats */
+export function arenaStats(): StatsResponse {
+  let online = 0
+  for (const arena of arenas) online += arena.clients.length
+  return { online, arenas: arenas.size }
+}
+
 export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   /** 자리 비움으로 퇴장시키는 무입력 시간 (프레임). 테스트에서 줄일 수 있다 */
   static afkFrames = AFK_FRAMES
@@ -76,6 +84,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   static closeDelayMs = 0
 
   state = new ArenaState()
+  maxClients = ARENA_CAPACITY
   patchRate = 1000 / PATCH_RATE
   inputs = this.defineInput(PlayerInput, {
     bufferMaxSize: INPUT_CREDIT_CAP,
@@ -97,10 +106,17 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   private pendingGrabs: PendingGrab[] = []
   private pendingThrows: string[] = []
   private dummies = new Map<string, Dummy>()
+  /** 이번 판에서 오른 최고 순위 (1부터) — 결과 화면 */
+  private bestRank = new Map<string, number>()
   private dummySeq = 0
   private readonly dummyInput: InputLike = { mx: 0, mz: 0, held: 0, pressed: 0 }
 
   onCreate() {
+    // 쓰고 있지 않은 가장 작은 번호 (design §6.1)
+    const used = new Set([...arenas].map((arena) => arena.state.arenaNo))
+    let arenaNo = 1
+    while (used.has(arenaNo)) arenaNo++
+    this.state.arenaNo = arenaNo
     arenas.add(this)
     this.rewind = this.allowRewindState({ maxRewindMs: MAX_REWIND_MS })
     this.rewind.attachAll(this.state.players, { fields: ['x', 'y', 'z'] })
@@ -113,14 +129,24 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     }
   }
 
-  onJoin(client: Client) {
+  /** 프로토콜 버전이 다르면 들이지 않는다 — 클라이언트는 새로고침을 안내한다 (design §6.7) */
+  onAuth(_client: Client, options?: Partial<JoinOptions>) {
+    if (options?.v !== PROTOCOL_VERSION) throw new ServerError(CloseCode.VersionMismatch, '게임이 새 버전으로 바뀌었습니다')
+    return true
+  }
+
+  onJoin(client: Client, options?: Partial<JoinOptions>) {
     const player = new PlayerState()
+    this.assignLook(player, options?.characterId)
+    this.assignName(player, options?.name)
     const spot = this.spawnPoint()
     resetAt(player, spot.x, spot.z, 0, 1)
     player.invuln = SPAWN_INVULN_FRAMES
+    player.joinTick = this.state.tick
     this.state.players.set(client.sessionId, player)
     this.pacing.set(client.sessionId, { credit: 0, silent: 0, lastActive: this.state.tick })
     this.joinedAt.set(client.sessionId, this.clock.elapsedTime)
+    this.updateRanks()
   }
 
   onLeave(client: Client) {
@@ -337,10 +363,14 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     const player = this.state.players.get(id)
     if (!player) return
     const killerState = killer ? this.state.players.get(killer) : undefined
-    if (killerState) killerState.kills++
+    if (killerState) {
+      killerState.kills++
+      this.updateRanks()
+    }
 
-    const credit = killer ? { killer } : {}
-    const event: ElimEvent = { tick: this.state.tick, victim: id, cause, ...credit }
+    // 탈락한 사람은 곧 상태에서 사라지므로 이름을 함께 보낸다 (킬 피드·결과 화면)
+    const credit = killer && killerState ? { killer, killerName: killerState.name } : killer ? { killer } : {}
+    const event: ElimEvent = { tick: this.state.tick, victim: id, victimName: player.name, cause, ...credit }
     this.broadcast(Msg.Elim, event)
     const client = this.clients.getById(id)
     if (client) {
@@ -349,6 +379,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
         kills: player.kills,
         cause,
         ...credit,
+        bestRank: this.bestRank.get(id) ?? this.state.players.size,
       }
       client.send(Msg.Result, result)
       const close = () => client.leave(CloseCode.Eliminated)
@@ -372,6 +403,23 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     this.combos.delete(id)
     this.lastHitBy.delete(id)
     this.dummies.delete(id)
+    this.bestRank.delete(id)
+    // 앞선 사람이 나가면 뒷사람들의 순위가 오른다
+    this.updateRanks()
+  }
+
+  /** 지금 순위로 각자의 최고 순위를 갱신한다 (킬·입장·퇴장 때만 바뀐다) */
+  private updateRanks() {
+    rankEntries(this.state.players.entries()).forEach(([id], i) => {
+      const best = this.bestRank.get(id)
+      if (best === undefined || i + 1 < best) this.bestRank.set(id, i + 1)
+    })
+  }
+
+  /** 받은 인덱스(없거나 잘못되면 무작위)로 이름을 조립하고, 이 경기장에서 겹치면 다시 뽑는다 (design §4.11) */
+  private assignName(player: PlayerState, requested: unknown) {
+    const taken = new Set([...this.state.players.values()].map((p) => p.name))
+    player.name = uniqueName(isNameIndex(requested) ? requested : randomNameIndex(), taken).name
   }
 
   /** 안쪽 영역의 후보 중 다른 플레이어와의 최소 거리가 가장 큰 곳 — design §6.4 */
@@ -412,10 +460,31 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     }
     const player = new PlayerState()
     player.isBot = true
+    // 샌드백은 캐릭터를 차례로 바꿔 가며 세운다 — 모든 캐릭터를 한 화면에서 볼 수 있다
+    this.assignLook(player, this.dummySeq % CHARACTER_COUNT)
+    this.assignName(player, undefined)
     placeDummy(player, dummy)
+    player.joinTick = this.state.tick
     const id = `dummy:${++this.dummySeq}`
     this.state.players.set(id, player)
     this.dummies.set(id, dummy)
+    this.updateRanks()
+  }
+
+  /**
+   * 캐릭터(고르지 않았거나 범위 밖이면 무작위)와 색상 변형을 정한다.
+   * 색상은 같은 캐릭터를 쓰는 사람들 사이에서 가장 적게 쓰인 것 — design §6.6
+   */
+  private assignLook(player: PlayerState, requested: unknown) {
+    const characterId = typeof requested === 'number' && Number.isInteger(requested) && requested >= 0 && requested < CHARACTER_COUNT
+      ? requested
+      : Math.floor(Math.random() * CHARACTER_COUNT)
+    const counts = new Array<number>(VARIANT_COUNT).fill(0)
+    for (const other of this.state.players.values()) {
+      if (other.characterId === characterId) counts[other.variant]++
+    }
+    player.characterId = characterId
+    player.variant = counts.indexOf(Math.min(...counts))
   }
 
   /** 움직이는 샌드백은 집을 중심으로 좌우로 왕복한다. 맞아서 밀려나도 다시 걸어서 돌아간다 */
@@ -454,6 +523,8 @@ function resetAt(p: PlayerState, x: number, z: number, fx: number, fz: number) {
   p.fz = fz
   setAction(p, Action.Idle)
   p.invuln = 0
+  p.kickCooldown = 0
+  p.grabCooldown = 0
   p.hp = MAX_HP
 }
 

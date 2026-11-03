@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<title>캐릭터 굽기</title>
+<script type="importmap">{"imports":{"three":"/three/build/three.module.js","three/addons/":"/three/examples/jsm/"}}</script>
+</head>
+<body>
+<script type="module">
+// bake.mjs가 띄우는 페이지: 레시피를 적용해 캐릭터 GLB를 만들고 클립 길이·타격 시점을 잰다
+import { GLTFExporter } from 'three/addons/exporters/GLTFExporter.js'
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js'
+import { CHARACTERS, CLIPS, LOCOMOTION_CLIPS, MIRRORED_CLIPS, STRIKE_CLIPS } from '../recipes.js'
+import { analyzeClip, buildCharacter, mirrorClip } from './edit.js'
+
+const loader = new GLTFLoader()
+const sources = new Map()
+const load = (base) => {
+  if (!sources.has(base)) sources.set(base, loader.loadAsync(`/src/${base}.glb`))
+  return sources.get(base)
+}
+const toBase64 = (buffer) => {
+  const bytes = new Uint8Array(buffer)
+  let text = ''
+  for (let i = 0; i < bytes.length; i += 0x8000) text += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
+  return btoa(text)
+}
+
+try {
+  const result = { characters: {}, meshes: {}, clips: {} }
+  for (const recipe of CHARACTERS) {
+    const root = buildCharacter(await load(recipe.base), recipe)
+    const glb = await new GLTFExporter().parseAsync(root, { binary: true, trs: true })
+    result.characters[recipe.key] = toBase64(glb)
+    const meshes = []
+    root.traverse((o) => {
+      if (o.isMesh) meshes.push({ name: o.name, triangles: o.geometry.attributes.position.count / 3 })
+    })
+    result.meshes[recipe.key] = meshes
+  }
+  // 모든 캐릭터가 같은 뼈대를 쓰므로 클립은 기사 파일에서 잰다
+  const reference = await load('Knight')
+  const find = (name) => {
+    const clip = reference.animations.find((a) => a.name === name)
+    if (!clip) throw new Error(`클립 없음: ${name}`)
+    return clip
+  }
+  // 좌우로 뒤집어 만드는 클립 — 키프레임을 넘겨 optimize.mjs가 공용 애니메이션 파일에 더한다
+  const derived = Object.entries(MIRRORED_CLIPS).map(([name, from]) => mirrorClip(reference, find(from), name))
+  result.derived = derived.map((clip) => ({
+    name: clip.name,
+    duration: clip.duration,
+    tracks: clip.tracks.map((track) => {
+      const [node, property] = track.name.split('.')
+      return { node, path: property === 'quaternion' ? 'rotation' : 'translation', times: [...track.times], values: [...track.values] }
+    }),
+  }))
+  for (const clip of [...CLIPS.map(find), ...derived]) {
+    const name = clip.name
+    result.clips[name] = analyzeClip(reference, clip, { strike: STRIKE_CLIPS.includes(name), locomotion: LOCOMOTION_CLIPS.includes(name) })
+  }
+  window.__bake = result
+} catch (err) {
+  window.__bakeError = String(err?.stack ?? err)
+}
+</script>
+</body>
+</html>
