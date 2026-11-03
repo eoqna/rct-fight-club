@@ -7,7 +7,7 @@ export const ROOM_NAME = 'arena'
 /** 게임 서버 기본 포트 */
 export const DEFAULT_PORT = 2567
 
-/** 프로토콜 버전 — 입장할 때 보내고, 서버와 다르면 4002로 거절한다 (클라이언트는 새로고침을 안내) */
+/** 프로토콜 버전 — 입장할 때 보내고, 서버와 다르면 CloseCode.VersionMismatch로 거절한다 (클라이언트는 새로고침을 안내) */
 export const PROTOCOL_VERSION = 1
 
 /** 메시지 이름 */
@@ -40,13 +40,30 @@ export interface StatsResponse {
   arenas: number
 }
 
-/** 서버가 연결을 끊을 때 쓰는 종료 코드 — design §5.8 */
+/**
+ * 서버가 연결을 끊거나 입장을 거절할 때 쓰는 코드 — design §5.8.
+ * Colyseus가 4000~4010을 쓰므로(4001 서버 종료, 4002 오류 등) 겹치지 않게 4100번대를 쓴다
+ */
 export const CloseCode = {
   /** 탈락 → 결과 화면 */
-  Eliminated: 4001,
+  Eliminated: 4101,
   /** 클라이언트 버전이 서버와 다르다 → 새로고침 안내 */
-  VersionMismatch: 4002,
+  VersionMismatch: 4102,
+  /** 같은 IP에서 동시에 접속한 수가 상한에 닿았다 (NFR-06) */
+  TooManyConnections: 4103,
 } as const
+
+/** 입장 요청(HTTP)을 거절할 때의 상태 코드 — 클라이언트는 MatchMakeError.code로 받는다 (design §6.7) */
+export const JoinRejectStatus = {
+  /** 허용하지 않는 페이지(Origin)나 입장 방식 */
+  Forbidden: 403,
+  /** 같은 IP의 입장 요청이 1분에 상한을 넘었다 */
+  TooManyRequests: 429,
+} as const
+
+/** 같은 IP에서 동시에 접속할 수 있는 수, 1분에 보낼 수 있는 입장 요청 수 — NFR-06 */
+export const MAX_CONNECTIONS_PER_IP = 3
+export const JOINS_PER_MINUTE = 10
 
 /** 명중 확정 — design §5.8 */
 export interface HitEvent {

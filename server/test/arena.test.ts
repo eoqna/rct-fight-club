@@ -1,4 +1,4 @@
-import type { Room, StepContext } from '@colyseus/core'
+import { CloseCode as ColyseusCloseCode, type Room, type StepContext } from '@colyseus/core'
 import { boot, type ColyseusTestServer } from '@colyseus/testing'
 import {
   AFK_FRAMES, ARENA_CAPACITY, ARENA_HALF, Action, BODY_RADIUS, Btn, CHARACTER_COUNT, CloseCode, IDLE_INPUT, MAX_HP, Msg, PROTOCOL_VERSION,
@@ -104,7 +104,7 @@ describe('게임 서버', () => {
   })
 
   describe('입장·매치메이킹', () => {
-    it('프로토콜 버전이 다르거나 없으면 4002로 거절한다', async () => {
+    it('프로토콜 버전이 다르거나 없으면 VersionMismatch(4102)로 거절한다', async () => {
       const room = await colyseus.createRoom(ROOM_NAME)
       await join(room) // 빈 방은 거절 뒤 바로 닫히므로 한 명을 둔다
       await expect(colyseus.connectTo(room, { v: PROTOCOL_VERSION + 1 })).rejects.toMatchObject({ code: CloseCode.VersionMismatch })
@@ -199,45 +199,6 @@ describe('게임 서버', () => {
     for (let i = 0; i < 30; i++) stepPlayer(expected, IDLE_INPUT, DT)
     expect(player.x).toBeCloseTo(expected.x, 6)
     expect(player.z).toBeCloseTo(expected.z, 6)
-  })
-
-  it('입력을 실제보다 빨리 보내도 캐릭터가 빨라지지 않는다', async () => {
-    const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await join(room)
-    await client.waitForInitialState()
-    const player = room.state.players.get(client.sessionId)!
-    place(player, -10, 0)
-
-    const input = client.input({ type: PlayerInput, mode: 'reliable' })
-    const ticks = 20
-    for (let t = 0; t < ticks; t++) {
-      for (let i = 0; i < 4; i++) {
-        input.data.mx = 127
-        input.send()
-      }
-      await room.waitForNextTimestep()
-    }
-
-    // 정상 속도라면 (틱 수 + 크레딧 상한 8) 스텝을 넘게 걸을 수 없다. 4배로 보내면 약 3배 거리를 간다
-    const maxDistance = (ticks + 8) * WALK_SPEED * DT
-    expect(player.x + 10).toBeLessThanOrEqual(maxDistance)
-  })
-
-  it('입력이 끊겨도 서버는 시뮬레이션을 계속 진행한다', async () => {
-    const room = await colyseus.createRoom(ROOM_NAME)
-    const client = await join(room)
-    await client.waitForInitialState()
-    const player = room.state.players.get(client.sessionId)!
-
-    const input = client.input({ type: PlayerInput, mode: 'reliable' })
-    input.data.pressed = Btn.Jump
-    input.send()
-    await waitTicks(room, 5)
-    expect(player.y).toBeGreaterThan(0)
-
-    await waitTicks(room, 90)
-    expect(player.y).toBe(0)
-    expect(player.action).toBe(Action.Idle)
   })
 
   it('다른 플레이어를 통과하지 못하고 맞닿은 자리에서 멈춘다. 서 있는 쪽은 밀리지 않는다', async () => {
@@ -512,6 +473,108 @@ describe('게임 서버', () => {
       } finally {
         ArenaRoom.afkFrames = AFK_FRAMES
       }
+    })
+  })
+
+  describe('악용 시나리오 (P6-2)', () => {
+    /** 보던 시점을 이만큼 앞으로 속인다 (ms) — 보간 지연을 크게 준 클라이언트와 같다 */
+    const FORGED_VIEW_DELAY_MS = 1500
+
+    it('속도 조작: 입력을 실제보다 빨리 보내도 캐릭터가 빨라지지 않는다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const client = await join(room)
+      await client.waitForInitialState()
+      const player = room.state.players.get(client.sessionId)!
+      place(player, -10, 0)
+
+      const input = client.input({ type: PlayerInput, mode: 'reliable' })
+      const ticks = 20
+      for (let t = 0; t < ticks; t++) {
+        for (let i = 0; i < 4; i++) {
+          input.data.mx = 127
+          input.send()
+        }
+        await room.waitForNextTimestep()
+      }
+
+      // 정상 속도라면 (틱 수 + 크레딧 상한 8) 스텝을 넘게 걸을 수 없다. 4배로 보내면 약 3배 거리를 간다
+      const maxDistance = (ticks + 8) * WALK_SPEED * DT
+      expect(player.x + 10).toBeLessThanOrEqual(maxDistance)
+    })
+
+    it('입력 폭주: 1초에 120개가 넘는 메시지를 보내면 연결을 끊는다 (정상인 초당 60개는 괜찮다)', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      await join(room) // 빈 방은 바로 닫히므로 한 명을 더 둔다
+      const client = await join(room)
+      const input = client.input({ type: PlayerInput, mode: 'reliable' })
+      await sendEachTick(room, input, 90, (data, i) => { data.mx = i % 2 ? 127 : -127 })
+      expect(room.state.players.has(client.sessionId)).toBe(true)
+
+      const left = leaveCode(client)
+      for (let i = 0; i < 300; i++) {
+        input.data.mx = i % 2 ? 127 : -127
+        input.send()
+      }
+      expect(await left).toBe(ColyseusCloseCode.WITH_ERROR)
+      await expect.poll(() => room.state.players.has(client.sessionId)).toBe(false)
+    })
+
+    it('공중 정지: 점프 중에 입력을 끊어도 서버는 계속 진행해 떨어뜨린다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const client = await join(room)
+      await client.waitForInitialState()
+      const player = room.state.players.get(client.sessionId)!
+
+      const input = client.input({ type: PlayerInput, mode: 'reliable' })
+      input.data.pressed = Btn.Jump
+      input.send()
+      await waitTicks(room, 5)
+      expect(player.y).toBeGreaterThan(0)
+
+      await waitTicks(room, 90)
+      expect(player.y).toBe(0)
+      expect(player.action).toBe(Action.Idle)
+    })
+
+    /** 공격자는 보던 시점을 1.5초 앞으로 속이고, 피해자는 바로 앞에 2초 동안 서 있었다 */
+    async function forgedDuel() {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const attacker = await join(room)
+      const victim = await join(room)
+      const a = room.state.players.get(attacker.sessionId)!
+      const b = room.state.players.get(victim.sessionId)!
+      place(a, 0, 0)
+      place(b, 0, 1)
+      const input = attacker.input({ type: PlayerInput, mode: 'reliable', renderDelay: FORGED_VIEW_DELAY_MS })
+      // 경기장이 속인 시간보다 오래돼야 시점이 찍힌다 (그 전에는 0 = 지금으로 본다)
+      await sendEachTick(room, input, 120, () => {})
+      return { room, attacker, victim, b, input }
+    }
+
+    it('과거 시점 악용: 1.5초 전 화면을 봤다고 속여도 300ms보다 더 되감지 않는다', async () => {
+      const { room, attacker, b, input } = await forgedDuel()
+      let hits = 0
+      attacker.onMessage(Msg.Hit, () => hits++)
+      // 피해자가 0.6초 전에 피했다 — 속인 시점(1.5초 전)에는 앞에 있었지만 되감기 상한(300ms) 안에서는 이미 없다
+      place(b, 0, 5)
+      await sendEachTick(room, input, 36, () => {})
+      await sendEachTick(room, input, 12, press(Btn.PunchL))
+      await waitTicks(room, 10)
+      expect(hits).toBe(0)
+      expect(b.hp).toBe(MAX_HP)
+    })
+
+    it('대조군: 상한(300ms) 안에서는 보던 시점대로 맞힌다 — 위 시험이 판정 고장 때문이 아니다', async () => {
+      const { room, attacker, victim, b, input } = await forgedDuel()
+      const hit = attacker.waitForMessage(Msg.Hit) as Promise<HitEvent>
+      // 잽을 누르고 판정 직전에 피해자가 피한다 — 지금 위치로는 빗나가지만 300ms 전에는 앞에 있었다
+      await sendEachTick(room, input, 12, (data, i) => {
+        data.pressed = i === 0 ? Btn.PunchL : 0
+        if (i === 4) place(b, 0, 5)
+      })
+      expect(await hit).toMatchObject({ attack: 'jab', victim: victim.sessionId })
+      // 맞은 때 피해자는 이미 4m 떨어져 있었다 — 지금 위치가 아니라 되감은 위치로 판정했다
+      expect(b.z).toBeGreaterThan(4)
     })
   })
 

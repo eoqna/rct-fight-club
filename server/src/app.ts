@@ -1,6 +1,13 @@
-import { defineRoom, defineServer } from '@colyseus/core'
+import { defineRoom, defineServer, matchMaker } from '@colyseus/core'
+import { WebSocketTransport } from '@colyseus/ws-transport'
 import { Msg, ROOM_NAME, type DevLatencyEvent, type StatsResponse } from '@fight-club/shared'
-import { ArenaRoom, arenaStats, notifyAllArenas } from './rooms/ArenaRoom.ts'
+import { config } from './config.ts'
+import { log } from './log.ts'
+import { mountAdmin } from './ops/admin.ts'
+import { snapshot } from './ops/metrics.ts'
+import { ArenaRoom, arenaStats, listArenas, notifyAllArenas } from './rooms/ArenaRoom.ts'
+import { createGatedServer, originAllowed } from './security/gate.ts'
+import { store } from './store/index.ts'
 
 /** 개발용 지연 주입의 상한 (ms, 왕복) */
 const MAX_SIMULATED_LATENCY_MS = 1000
@@ -28,12 +35,31 @@ trackLatency(Number(process.env.COLYSEUS_LATENCY) || 0)
 // 봇 끄기 (E2E·자동 점검처럼 혼자 있어야 하는 경우): BOTS=0
 if (process.env.BOTS === '0') ArenaRoom.botFill = 0
 
+/** 앞문을 단 HTTP 서버 — 입장 요청과 WebSocket 연결을 Colyseus보다 먼저 검사한다 (design §6.7) */
+const httpServer = createGatedServer({ config, limits: () => store.limits, log })
+
+// Colyseus는 모든 응답에 요청한 출처를 그대로 돌려주며 자격 증명을 허용한다 (SDK가 credentials: 'include'로 입장한다).
+// 허용 목록이 있으면 그 출처에만 돌려준다 — 나머지는 기본값 '*'라 브라우저가 자격 증명을 실은 응답을 넘겨주지 않는다
+matchMaker.controller.getCorsHeaders = (headers: Headers): Record<string, string> => {
+  const origin = headers.get('origin') ?? undefined
+  return origin !== undefined && originAllowed(config, origin) ? { 'Access-Control-Allow-Origin': origin } : {}
+}
+
 export const server = defineServer({
+  transport: new WebSocketTransport({ server: httpServer }),
+  // Colyseus가 남기는 로그도 같은 JSON 형식으로
+  logger: log.child({ module: 'colyseus' }),
   rooms: {
     // 빈자리가 있는 경기장 중 사람이 가장 많은 곳에 넣는다. 모두 차면(정원 16) 새로 연다 (design §6.1, FR-03·04)
     [ROOM_NAME]: defineRoom(ArenaRoom).sortBy({ clients: -1 }),
   },
   express: (app) => {
+    app.disable('x-powered-by')
+    // 첫 화면 경로가 있으면 Colyseus가 버전을 알리는 기본 응답을 붙이지 않는다
+    app.get('/', (_req, res) => {
+      res.status(404).end()
+    })
+
     app.get('/healthz', (_req, res) => {
       res.send('ok')
     })
@@ -49,7 +75,10 @@ export const server = defineServer({
       res.json(statsCache.value)
     })
 
-    if (process.env.NODE_ENV !== 'production') {
+    // 운영 모니터 (읽기 전용, Basic 인증) — ADMIN_PASSWORD가 있을 때만 열린다
+    mountAdmin(app, { password: () => config.adminPassword, limits: () => store.limits, snapshot: () => snapshot(listArenas()) })
+
+    if (!config.production) {
       // 개발 전용: 넷코드 체감 시험용 왕복 지연 주입 (S1) — 예: POST /dev/latency?ms=150
       app.get('/dev/latency', (_req, res) => {
         res.set('Access-Control-Allow-Origin', '*')

@@ -3,6 +3,7 @@ import { CHARACTER_COUNT } from '@fight-club/shared/constants'
 import { randomNameIndex, type NameIndex } from '@fight-club/shared/nickname'
 import { CloseCode, PROTOCOL_VERSION, type JoinOptions, type ResultMsg } from '@fight-club/shared/protocol'
 import type { GameSession } from './game/session.ts'
+import { joinFailureText } from './game/texts.ts'
 import { hasWebGL2 } from './scene/quality.ts'
 import { ResultScreen } from './screens/ResultScreen.tsx'
 import { SelectScreen } from './screens/SelectScreen.tsx'
@@ -91,7 +92,7 @@ function Game() {
         const code = (error as { code?: number }).code
         setScreen(code === CloseCode.VersionMismatch
           ? { name: 'outdated' }
-          : { name: 'select', notice: `경기장에 들어가지 못했습니다. 잠시 뒤 다시 시도해 주세요. (${errorText(error)})` })
+          : { name: 'select', notice: joinFailureText(code, errorText(error)) })
       }))
     return () => {
       cancelled = true

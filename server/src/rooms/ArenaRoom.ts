@@ -1,4 +1,7 @@
-import { Room, ServerError, type Client, type Rewind, type StepContext } from '@colyseus/core'
+import {
+  CloseCode as ColyseusCloseCode, Room, ServerError,
+  type AuthContext, type Client, type ClientPrivate, type Rewind, type RoomException, type RoomMethodName, type StepContext,
+} from '@colyseus/core'
 import {
   AFK_FRAMES, ALL_BUTTONS, ARENA_CAPACITY, ARENA_HALF, ATTACKS, Action, ArenaState, BODY_RADIUS, CHARACTER_COUNT,
   COMBO_KNOCKDOWN_HITS, COMBO_WINDOW_FRAMES, CloseCode, FALL_OUT_Y, IDLE_INPUT, KO_FRAMES, MAX_HP, MAX_REWIND_MS, Msg,
@@ -9,6 +12,11 @@ import {
   type JoinOptions, type ResultMsg, type StatsResponse, type StrikeId,
 } from '@fight-club/shared'
 import { BotBrain, type BotWorld } from '../bots/brain.ts'
+import { config } from '../config.ts'
+import { log } from '../log.ts'
+import { ArenaMeter, countBlocked, type MeteredArena } from '../ops/metrics.ts'
+import { CLIENT_KEY_HEADER, EXEMPT_KEY } from '../security/clientKey.ts'
+import { store } from '../store/index.ts'
 
 /**
  * 입력 크레딧 상한 (스텝). 틱마다 1씩 쌓이고 입력 하나를 처리할 때 1씩 쓴다.
@@ -18,6 +26,15 @@ const INPUT_CREDIT_CAP = 8
 
 /** 이 틱 수만큼 입력이 없으면 서버가 빈 입력으로 진행한다 (100ms) — design §6.3 */
 const IDLE_AFTER_TICKS = 6
+
+/**
+ * 한 클라이언트가 1초에 보낼 수 있는 메시지 수. 정상은 입력 60개(틱마다 하나, 밀려도 한 프레임에 5개까지)다.
+ * 넘으면 Colyseus가 연결을 끊는다 (종료 코드 4002) — design §6.3
+ */
+const MAX_MESSAGES_PER_SECOND = 120
+
+/** 같은 곳(onJoin, 틱 처리 …)에서 난 처리하지 못한 오류는 1초에 한 번만 로그에 남긴다 (ms) */
+const ERROR_LOG_INTERVAL_MS = 1000
 
 /** 스폰: 가장자리에서 떨어진 안쪽 영역에서 후보를 뽑아 다른 플레이어와 가장 먼 곳에 세운다 — design §6.4 */
 const SPAWN_HALF = 8
@@ -64,6 +81,11 @@ interface PendingGrab {
   target: string
 }
 
+/** onAuth가 돌려주고 onJoin이 받는 입장 정보 — 앞문(security/gate.ts)이 붙인 IP 해시 키 */
+interface JoinTicket {
+  clientKey: string
+}
+
 /** 개발용 샌드백 — 혼자서도 때려 볼 대상. 봇과 달리 스스로 싸우지 않고, 쓰러지거나 떨어지면 제자리로 돌아온다 */
 interface Dummy {
   homeX: number
@@ -78,6 +100,11 @@ interface Dummy {
 /** 이 프로세스에 열려 있는 경기장 */
 const arenas = new Set<ArenaRoom>()
 
+/** 지표용: 이 프로세스의 경기장들 */
+export function listArenas(): Iterable<MeteredArena> {
+  return arenas
+}
+
 /** 모든 경기장의 모든 클라이언트에게 알린다 (개발 도구용) */
 export function notifyAllArenas(type: string, message: unknown) {
   for (const arena of arenas) arena.broadcast(type, message)
@@ -90,7 +117,7 @@ export function arenaStats(): StatsResponse {
   return { online, arenas: arenas.size }
 }
 
-export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
+export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> implements MeteredArena {
   /** 자리 비움으로 퇴장시키는 무입력 시간 (프레임). 테스트에서 줄일 수 있다 */
   static afkFrames = AFK_FRAMES
   /** 탈락자에게 결과를 보낸 뒤 연결을 끊기까지 기다리는 시간 (ms). 개발용 지연 주입 중에만 쓴다 (app.ts가 정한다) */
@@ -101,6 +128,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   state = new ArenaState()
   maxClients = ARENA_CAPACITY
   patchRate = 1000 / PATCH_RATE
+  maxMessagesPerSecond = MAX_MESSAGES_PER_SECOND
+  /** 지난 1분의 틱 처리 시간·패치 크기 */
+  readonly meter = new ArenaMeter()
   inputs = this.defineInput(PlayerInput, {
     bufferMaxSize: INPUT_CREDIT_CAP,
     sanitize: { mx: [-127, 127], mz: [-127, 127], held: [0, ALL_BUTTONS], pressed: [0, ALL_BUTTONS] },
@@ -126,21 +156,31 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   private dummySeq = 0
   private readonly dummyInput: InputLike = { mx: 0, mz: 0, held: 0, pressed: 0 }
   /** 봇 두뇌 (넣은 순서 — 가장 최근 것부터 뺀다) */
-  private bots = new Map<string, BotBrain>()
+  private botBrains = new Map<string, BotBrain>()
   private botSeq = 0
   /** 봇을 다시 채울 틱 (-1이면 예정 없음) */
   private botRefillAt = -1
   /** 상대별로 지금 쫓고 있는 봇 수 — 한 사람에게 몰리지 않게 */
   private chaserCounts = new Map<string, number>()
   private botWorld!: BotWorld
+  /** 사람 → 동시 접속 제한에 센 IP 키 (나갈 때 돌려준다) */
+  private connectionKeys = new Map<string, string>()
+  /** 오류를 마지막으로 로그에 남긴 시각 (곳마다) */
+  private errorLoggedAt = new Map<RoomMethodName, number>()
 
-  onCreate() {
-    // 쓰고 있지 않은 가장 작은 번호 (design §6.1)
-    const used = new Set([...arenas].map((arena) => arena.state.arenaNo))
-    let arenaNo = 1
-    while (used.has(arenaNo)) arenaNo++
-    this.state.arenaNo = arenaNo
-    arenas.add(this)
+  get arenaNo(): number {
+    return this.state.arenaNo
+  }
+
+  get humans(): number {
+    return this.pacing.size
+  }
+
+  get bots(): number {
+    return this.botBrains.size
+  }
+
+  async onCreate() {
     this.rewind = this.allowRewindState({ maxRewindMs: MAX_REWIND_MS })
     this.rewind.attachAll(this.state.players, { fields: ['x', 'y', 'z'] })
     // 가드 판정은 공격자가 보던 시점의 동작·방향도 본다. 이어지는 값이 아니므로 보간하지 않는다
@@ -153,18 +193,34 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
       chasers: (id) => this.chaserCounts.get(id) ?? 0,
     }
 
-    if (process.env.NODE_ENV !== 'production') {
+    if (!config.production) {
       this.onMessage<DevDummyCommand>(Msg.DevDummy, (client, command) => this.commandDummy(client.sessionId, command))
     }
+    this.measurePatches()
+
+    // 쓰고 있지 않은 가장 작은 번호 (design §6.1)
+    this.state.arenaNo = await store.arenaNumbers.claim()
+    arenas.add(this)
   }
 
-  /** 프로토콜 버전이 다르면 들이지 않는다 — 클라이언트는 새로고침을 안내한다 (design §6.7) */
-  onAuth(_client: Client, options?: Partial<JoinOptions>) {
-    if (options?.v !== PROTOCOL_VERSION) throw new ServerError(CloseCode.VersionMismatch, '게임이 새 버전으로 바뀌었습니다')
-    return true
+  /**
+   * 입장 허가 (design §6.7): 프로토콜 버전이 다르면 들이지 않는다 — 클라이언트는 새로고침을 안내한다.
+   * 앞문이 붙인 IP 키를 넘겨 onJoin이 동시 접속을 센다
+   */
+  onAuth(_client: Client, options: Partial<JoinOptions> | undefined, context: AuthContext): JoinTicket {
+    if (options?.v !== PROTOCOL_VERSION) {
+      countBlocked('version')
+      throw new ServerError(CloseCode.VersionMismatch, '게임이 새 버전으로 바뀌었습니다')
+    }
+    return { clientKey: context.headers.get(CLIENT_KEY_HEADER) ?? 'unknown' }
   }
 
-  onJoin(client: Client, options?: Partial<JoinOptions>) {
+  async onJoin(client: Client, options?: Partial<JoinOptions>) {
+    // 동시 접속은 여기서 센다 — onAuth에서 세면, 인증 직후 끊긴 연결은 onLeave가 불리지 않아 자리가 샌다
+    if (!(await this.openConnection(client.sessionId, (client.auth as JoinTicket).clientKey))) {
+      countBlocked('connections')
+      throw new ServerError(CloseCode.TooManyConnections, `같은 곳에서 동시에 ${config.maxConnectionsPerIp}명까지만 들어올 수 있습니다`)
+    }
     const player = new PlayerState()
     this.assignLook(player, options?.characterId)
     this.assignName(player, options?.name)
@@ -177,18 +233,87 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     this.joinedAt.set(client.sessionId, this.clock.elapsedTime)
     this.updateRanks()
     this.syncBots(true)
+    log.info({ event: 'join', arena: this.arenaNo, session: client.sessionId, humans: this.humans })
   }
 
-  onLeave(client: Client) {
+  onLeave(client: Client, code?: number) {
+    this.closeConnection(client.sessionId)
+    // 탈락한 사람은 eliminate()가 먼저 지웠다 (탈락 로그가 따로 있다)
+    const playing = this.pacing.has(client.sessionId)
     this.removePlayer(client.sessionId)
     this.syncBots(false)
+    if (!playing) return
+    // 메시지를 너무 많이 보내 Colyseus가 끊었으면 따로 센다
+    const flood = code === ColyseusCloseCode.WITH_ERROR
+      && ((client as Client & ClientPrivate)._numMessagesLastSecond ?? 0) > this.maxMessagesPerSecond
+    if (flood) countBlocked('flood')
+    log.info({ event: 'leave', arena: this.arenaNo, session: client.sessionId, code, flood, humans: this.humans })
   }
 
-  onDispose() {
+  async onDispose() {
     arenas.delete(this)
+    await store.arenaNumbers.release(this.arenaNo)
   }
 
+  /**
+   * 처리하지 못한 오류는 경기장을 멈추지 않고 로그에 남긴다 (같은 곳의 오류는 1초에 한 번).
+   * 일부러 거절한 입장(ServerError)은 오류가 아니므로 남기지 않는다
+   */
+  onUncaughtException(error: RoomException, method: RoomMethodName) {
+    if (error.cause instanceof ServerError) return
+    const now = Date.now()
+    if (now - (this.errorLoggedAt.get(method) ?? 0) < ERROR_LOG_INTERVAL_MS) return
+    this.errorLoggedAt.set(method, now)
+    log.error({ event: 'error', arena: this.arenaNo, method, err: error.cause ?? error }, '경기장 처리 중 오류')
+  }
+
+  /** IP 제한에서 뺀 접속(개발 중 같은 컴퓨터)은 세지 않는다. 제한 저장소가 고장 나면 들여보낸다 (막는 것보다 덜 나쁘다) */
+  private async openConnection(sessionId: string, key: string): Promise<boolean> {
+    if (key === EXEMPT_KEY) return true
+    try {
+      if (!(await store.limits.openConnection(key))) return false
+    } catch (error) {
+      log.error({ event: 'error', err: error }, '동시 접속 수를 확인하지 못했습니다')
+      return true
+    }
+    this.connectionKeys.set(sessionId, key)
+    return true
+  }
+
+  private closeConnection(sessionId: string) {
+    const key = this.connectionKeys.get(sessionId)
+    if (key === undefined) return
+    this.connectionKeys.delete(sessionId)
+    store.limits.closeConnection(key).catch((error: unknown) => log.error({ event: 'error', err: error }, '동시 접속 수를 줄이지 못했습니다'))
+  }
+
+  /**
+   * 상태 패치 크기를 잰다 (P6-3). 공개 API가 없어 Colyseus가 패치를 만들 때 부르는 인코더의 encode를 감싼다 —
+   * 전체 상태(입장할 때)는 다른 함수로 만들므로 섞이지 않는다. 내부가 바뀌어 찾지 못하면 재지 않을 뿐이다
+   */
+  private measurePatches() {
+    type Encode = (...args: unknown[]) => Uint8Array
+    const encoder = (this as unknown as { _serializer?: { encoder?: { encode?: Encode } } })._serializer?.encoder
+    const encode = encoder?.encode
+    if (!encoder || typeof encode !== 'function') {
+      log.warn({ event: 'config' }, '상태 패치 크기를 잴 수 없습니다 (Colyseus 내부가 바뀌었습니다)')
+      return
+    }
+    encoder.encode = (...args) => {
+      const bytes = encode.apply(encoder, args)
+      this.meter.patchBytes.push(bytes.byteLength)
+      return bytes
+    }
+  }
+
+  /** 한 틱 처리 — 걸린 시간을 지표에 남긴다 (design §8.3) */
   private update(ctx: StepContext) {
+    const started = performance.now()
+    this.step(ctx)
+    this.meter.tickMs.push(performance.now() - started)
+  }
+
+  private step(ctx: StepContext) {
     this.state.tick = ctx.tick
     this.pendingHits.length = 0
     this.pendingGrabs.length = 0
@@ -407,6 +532,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     const credit = killer && killerState ? { killer, killerName: killerState.name } : killer ? { killer } : {}
     const event: ElimEvent = { tick: this.state.tick, victim: id, victimName: player.name, cause, ...credit }
     this.broadcast(Msg.Elim, event)
+    log.info({ event: 'elim', arena: this.arenaNo, session: id, bot: player.isBot, cause, killer })
     const client = this.clients.getById(id)
     if (client) {
       const result: ResultMsg = {
@@ -438,7 +564,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     this.combos.delete(id)
     this.lastHitBy.delete(id)
     this.dummies.delete(id)
-    this.bots.delete(id)
+    this.botBrains.delete(id)
     this.bestRank.delete(id)
     // 앞선 사람이 나가면 뒷사람들의 순위가 오른다
     this.updateRanks()
@@ -459,7 +585,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   private syncBots(now: boolean) {
     const humans = this.pacing.size
     const want = humans > 0 ? Math.max(0, ArenaRoom.botFill - humans) : 0
-    const ids = [...this.bots.keys()]
+    const ids = [...this.botBrains.keys()]
     while (ids.length > want) this.removePlayer(ids.pop()!)
     if (ids.length >= want) {
       this.botRefillAt = -1
@@ -483,19 +609,19 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     player.joinTick = this.state.tick
     const id = `bot:${++this.botSeq}`
     this.state.players.set(id, player)
-    this.bots.set(id, new BotBrain())
+    this.botBrains.set(id, new BotBrain())
     this.updateRanks()
   }
 
   /** 봇마다 두뇌가 만든 입력으로 한 스텝 (보던 시점이 따로 없으므로 되감지 않는다) */
   private stepBots(tick: number, dt: number) {
-    if (this.bots.size === 0) return
+    if (this.botBrains.size === 0) return
     this.chaserCounts.clear()
-    for (const brain of this.bots.values()) {
+    for (const brain of this.botBrains.values()) {
       if (brain.target) this.chaserCounts.set(brain.target, (this.chaserCounts.get(brain.target) ?? 0) + 1)
     }
     this.botWorld.tick = tick
-    for (const [id, brain] of this.bots) {
+    for (const [id, brain] of this.botBrains) {
       const player = this.state.players.get(id)
       if (player) this.advance(id, player, brain.think(id, player, this.botWorld), dt, false)
     }
