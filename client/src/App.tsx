@@ -72,7 +72,9 @@ function Game() {
   useEffect(() => {
     if (screen.name !== 'connecting') return
     let cancelled = false
-    enter({ v: PROTOCOL_VERSION, characterId, name })
+    // 개발 빌드의 StrictMode는 효과를 한 번 지웠다가 다시 실행한다 — 바로 연결하면 서버에 한 번 더 들어갔다 나가므로
+    // (봇 수가 잠깐 줄었다 3초 뒤 다시 찬다) 다음 차례에 연결을 시작하고, 지워지면 시작 전에 취소한다
+    const start = setTimeout(() => enter({ v: PROTOCOL_VERSION, characterId, name })
       .then((session) => {
         if (cancelled) return session.dispose()
         session.onEnd((end) => {
@@ -90,9 +92,10 @@ function Game() {
         setScreen(code === CloseCode.VersionMismatch
           ? { name: 'outdated' }
           : { name: 'select', notice: `경기장에 들어가지 못했습니다. 잠시 뒤 다시 시도해 주세요. (${errorText(error)})` })
-      })
+      }))
     return () => {
       cancelled = true
+      clearTimeout(start)
     }
     // 입장할 때의 캐릭터·이름으로 한 번만 연결한다
     // eslint-disable-next-line react-hooks/exhaustive-deps

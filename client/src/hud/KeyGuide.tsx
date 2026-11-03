@@ -34,7 +34,7 @@ const COOLDOWN_FRAMES: Record<CooldownKind, number> = { kick: KICK_COOLDOWN, gra
 
 /**
  * 화면 아래 양쪽의 키보드 그림 — 왼쪽은 A·S·D·F·G, 오른쪽은 방향키. 누르는 동안 키가 눌려 들어가 보이고,
- * 쿨타임 중인 발차기·잡기 키에는 남은 시간이 표시된다. 터치 기기에서는 숨긴다 (모바일 조작은 P5)
+ * 쿨타임 중인 발차기·잡기 키에는 남은 시간이 표시된다. 터치 기기에서는 숨긴다 (모바일 조작은 추후 개발)
  */
 export function KeyGuide({ session }: { session: GameSession }) {
   const pressed = usePressedKeys()

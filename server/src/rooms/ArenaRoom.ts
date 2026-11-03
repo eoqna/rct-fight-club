@@ -1,4 +1,4 @@
-import { Room, ServerError, type Client, type Rewind, type RewindView, type StepContext } from '@colyseus/core'
+import { Room, ServerError, type Client, type Rewind, type StepContext } from '@colyseus/core'
 import {
   AFK_FRAMES, ALL_BUTTONS, ARENA_CAPACITY, ARENA_HALF, ATTACKS, Action, ArenaState, BODY_RADIUS, CHARACTER_COUNT,
   COMBO_KNOCKDOWN_HITS, COMBO_WINDOW_FRAMES, CloseCode, FALL_OUT_Y, IDLE_INPUT, KO_FRAMES, MAX_HP, MAX_REWIND_MS, Msg,
@@ -8,6 +8,7 @@ import {
   type AttackId, type Body, type DevDummyCommand, type ElimCause, type ElimEvent, type HitEvent, type InputLike,
   type JoinOptions, type ResultMsg, type StatsResponse, type StrikeId,
 } from '@fight-club/shared'
+import { BotBrain, type BotWorld } from '../bots/brain.ts'
 
 /**
  * 입력 크레딧 상한 (스텝). 틱마다 1씩 쌓이고 입력 하나를 처리할 때 1씩 쓴다.
@@ -24,6 +25,18 @@ const SPAWN_CANDIDATES = 12
 
 /** 잡힌 쪽을 붙여 두는 거리 — 몸끼리 맞닿는 거리라 서로 밀어내지 않는다 */
 const GRAB_GAP = BODY_RADIUS * 2
+
+/** 봇: 사람이 1~3명이면 모두 이만큼이 되도록 채운다. 탈락하거나 사람이 나가 모자라면 이만큼 뒤에 채운다 (프레임) — design §6.5 */
+const BOT_FILL = 4
+const BOT_REFILL_FRAMES = 3 * TICK_RATE
+
+/** 판정에 쓰는 세계: 공격자가 보던 시점(되감기) 또는 지금 */
+interface SeenWorld {
+  value(entity: PlayerState, field: 'x' | 'y' | 'z' | 'fx' | 'fz' | 'action'): number
+}
+
+/** 되감지 않고 지금 값을 읽는다 — 보던 시점이 따로 없는 입력(빈 입력·샌드백·봇)용 */
+const LIVE: SeenWorld = { value: (entity, field) => entity[field] }
 
 /** 개발용 샌드백: 요청한 플레이어 앞 거리, 집 위치 범위(왕복해도 경기장 안), 왕복 반경 (m) */
 const DUMMY_DISTANCE = 2.5
@@ -51,7 +64,7 @@ interface PendingGrab {
   target: string
 }
 
-/** 개발용 샌드백 — P5의 봇이 들어오기 전, 혼자서도 때려 볼 대상 */
+/** 개발용 샌드백 — 혼자서도 때려 볼 대상. 봇과 달리 스스로 싸우지 않고, 쓰러지거나 떨어지면 제자리로 돌아온다 */
 interface Dummy {
   homeX: number
   homeZ: number
@@ -82,6 +95,8 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   static afkFrames = AFK_FRAMES
   /** 탈락자에게 결과를 보낸 뒤 연결을 끊기까지 기다리는 시간 (ms). 개발용 지연 주입 중에만 쓴다 (app.ts가 정한다) */
   static closeDelayMs = 0
+  /** 봇으로 채우는 전체 인원. 0이면 봇이 없다 — 테스트·자동 점검은 끈다 (서버 환경 변수 BOTS=0) */
+  static botFill = BOT_FILL
 
   state = new ArenaState()
   maxClients = ARENA_CAPACITY
@@ -110,6 +125,14 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
   private bestRank = new Map<string, number>()
   private dummySeq = 0
   private readonly dummyInput: InputLike = { mx: 0, mz: 0, held: 0, pressed: 0 }
+  /** 봇 두뇌 (넣은 순서 — 가장 최근 것부터 뺀다) */
+  private bots = new Map<string, BotBrain>()
+  private botSeq = 0
+  /** 봇을 다시 채울 틱 (-1이면 예정 없음) */
+  private botRefillAt = -1
+  /** 상대별로 지금 쫓고 있는 봇 수 — 한 사람에게 몰리지 않게 */
+  private chaserCounts = new Map<string, number>()
+  private botWorld!: BotWorld
 
   onCreate() {
     // 쓰고 있지 않은 가장 작은 번호 (design §6.1)
@@ -123,6 +146,12 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     // 가드 판정은 공격자가 보던 시점의 동작·방향도 본다. 이어지는 값이 아니므로 보간하지 않는다
     this.rewind.attachAll(this.state.players, { fields: ['action', 'fx', 'fz'], interpolate: 'step' })
     this.setFixedTimestep((ctx) => this.update(ctx), TICK_RATE)
+    this.botWorld = {
+      tick: 0,
+      players: this.state.players,
+      isHuman: (id) => this.pacing.has(id),
+      chasers: (id) => this.chaserCounts.get(id) ?? 0,
+    }
 
     if (process.env.NODE_ENV !== 'production') {
       this.onMessage<DevDummyCommand>(Msg.DevDummy, (client, command) => this.commandDummy(client.sessionId, command))
@@ -147,10 +176,12 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     this.pacing.set(client.sessionId, { credit: 0, silent: 0, lastActive: this.state.tick })
     this.joinedAt.set(client.sessionId, this.clock.elapsedTime)
     this.updateRanks()
+    this.syncBots(true)
   }
 
   onLeave(client: Client) {
     this.removePlayer(client.sessionId)
+    this.syncBots(false)
   }
 
   onDispose() {
@@ -184,6 +215,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
         this.advance(id, player, IDLE_INPUT, ctx.dt, false)
       }
     }
+
+    if (this.botRefillAt >= 0 && ctx.tick >= this.botRefillAt) this.syncBots(true)
+    this.stepBots(ctx.tick, ctx.dt)
 
     for (const [id, dummy] of this.dummies) {
       const player = this.state.players.get(id)
@@ -239,9 +273,9 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     }
   }
 
-  /** 공격자가 보던 시점의 세계 (빈 입력·샌드백은 시점 정보가 없으므로 현재) */
-  private view(id: string, lagComp: boolean): RewindView {
-    return lagComp ? this.rewind.lastSeenBy(id) : this.rewind.at(0)
+  /** 공격자가 보던 시점의 세계 (빈 입력·샌드백·봇은 보던 시점이 없으므로 지금) */
+  private view(id: string, lagComp: boolean): SeenWorld {
+    return lagComp ? this.rewind.lastSeenBy(id) : LIVE
   }
 
   /** 조준 보정 대상: 공격자가 보던 시점의 맞을 수 있는 상대 위치 */
@@ -356,6 +390,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
       }
     }
     for (const [id, cause, killer] of out) this.eliminate(id, cause, killer)
+    if (out.length > 0) this.syncBots(false)
   }
 
   /** 모두에게 알리고, 본인에게 결과를 보낸 뒤 연결을 끊는다 */
@@ -403,6 +438,7 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
     this.combos.delete(id)
     this.lastHitBy.delete(id)
     this.dummies.delete(id)
+    this.bots.delete(id)
     this.bestRank.delete(id)
     // 앞선 사람이 나가면 뒷사람들의 순위가 오른다
     this.updateRanks()
@@ -414,6 +450,55 @@ export class ArenaRoom extends Room<{ state: ArenaState; input: PlayerInput }> {
       const best = this.bestRank.get(id)
       if (best === undefined || i + 1 < best) this.bestRank.set(id, i + 1)
     })
+  }
+
+  /**
+   * 봇 수 맞추기 (design §6.5): 사람이 1~3명이면 모두 botFill명이 되도록 봇을 둔다. 많으면 가장 최근에 넣은 봇부터 빼고,
+   * 모자라면 바로(사람이 들어왔을 때) 또는 3초 뒤(봇이 탈락했거나 사람이 나갔을 때) 새 이름의 봇으로 채운다
+   */
+  private syncBots(now: boolean) {
+    const humans = this.pacing.size
+    const want = humans > 0 ? Math.max(0, ArenaRoom.botFill - humans) : 0
+    const ids = [...this.bots.keys()]
+    while (ids.length > want) this.removePlayer(ids.pop()!)
+    if (ids.length >= want) {
+      this.botRefillAt = -1
+    } else if (now) {
+      for (let n = ids.length; n < want; n++) this.addBot()
+      this.botRefillAt = -1
+    } else if (this.botRefillAt < 0) {
+      this.botRefillAt = this.state.tick + BOT_REFILL_FRAMES
+    }
+  }
+
+  /** 사람처럼 무작위 캐릭터·이름으로, 다른 사람과 먼 곳에 3초 무적으로 들어온다 */
+  private addBot() {
+    const player = new PlayerState()
+    player.isBot = true
+    this.assignLook(player, undefined)
+    this.assignName(player, undefined)
+    const spot = this.spawnPoint()
+    resetAt(player, spot.x, spot.z, 0, 1)
+    player.invuln = SPAWN_INVULN_FRAMES
+    player.joinTick = this.state.tick
+    const id = `bot:${++this.botSeq}`
+    this.state.players.set(id, player)
+    this.bots.set(id, new BotBrain())
+    this.updateRanks()
+  }
+
+  /** 봇마다 두뇌가 만든 입력으로 한 스텝 (보던 시점이 따로 없으므로 되감지 않는다) */
+  private stepBots(tick: number, dt: number) {
+    if (this.bots.size === 0) return
+    this.chaserCounts.clear()
+    for (const brain of this.bots.values()) {
+      if (brain.target) this.chaserCounts.set(brain.target, (this.chaserCounts.get(brain.target) ?? 0) + 1)
+    }
+    this.botWorld.tick = tick
+    for (const [id, brain] of this.bots) {
+      const player = this.state.players.get(id)
+      if (player) this.advance(id, player, brain.think(id, player, this.botWorld), dt, false)
+    }
   }
 
   /** 받은 인덱스(없거나 잘못되면 무작위)로 이름을 조립하고, 이 경기장에서 겹치면 다시 뽑는다 (design §4.11) */

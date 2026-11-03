@@ -474,7 +474,7 @@ button.secondary:focus-visible,
   white-space: nowrap;
 }
 
-/* 키보드가 없는 터치 기기에서는 숨긴다 (모바일 조작은 P5) */
+/* 키보드가 없는 터치 기기에서는 숨긴다 (모바일 조작은 추후 개발) */
 @media (pointer: coarse) {
   .keys {
     display: none;

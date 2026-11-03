@@ -353,7 +353,7 @@ export class GameSession {
       latencyMs: this.latencyMs,
       targets: [...this.room.state.players]
         .filter(([id]) => id !== this.myId)
-        .map(([id, p]) => ({ label: p.isBot ? `샌드백 ${id.slice('dummy:'.length)}` : '상대', hp: p.hp })),
+        .map(([id, p]) => ({ label: id.startsWith('dummy:') ? `샌드백 ${id.slice('dummy:'.length)}` : p.isBot ? `🤖 ${p.name}` : '상대', hp: p.hp })),
       myAction: me ? `${ACTION_NAMES.get(me.action) ?? me.action} (${me.actionFrame})` : '-',
       recentElims: this.elims,
     }

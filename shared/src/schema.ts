@@ -36,7 +36,7 @@ export const PlayerState = schema({
   grabCooldown: t.uint16().default(0),
   hp: t.uint8().default(MAX_HP),
   kills: t.uint16().default(0),
-  /** 사람이 아닌 대상 (지금은 개발용 샌드백, P5부터 봇) */
+  /** 사람이 아닌 대상 — 봇(🤖)과 개발용 샌드백 */
   isBot: t.boolean().default(false),
   /** 닉네임 — 서버가 인덱스로 조립한다 */
   name: t.string().default(''),

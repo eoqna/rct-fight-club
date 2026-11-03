@@ -17,11 +17,12 @@ export default defineConfig({
   },
   projects: [
     { name: 'desktop', use: { viewport: { width: 1280, height: 720 } } },
-    // 가로로 든 휴대폰 화면 크기 (터치 조작은 P5 — 여기서는 화면 흐름과 배치를 본다)
+    // 가로로 든 휴대폰 화면 크기 (터치 조작은 추후 개발 — 여기서는 화면 흐름과 배치를 본다)
     { name: 'mobile', use: { viewport: { width: 844, height: 390 }, deviceScaleFactor: 2, isMobile: true, hasTouch: true } },
   ],
   webServer: [
-    { command: 'npx tsx server/src/index.ts', port: SERVER_PORT, env: { PORT: String(SERVER_PORT) }, reuseExistingServer: false },
+    // 봇은 끈다 — 흐름 검사는 정해진 사람들끼리만 있어야 한다 (봇은 서버 통합 테스트가 본다)
+    { command: 'npx tsx server/src/index.ts', port: SERVER_PORT, env: { PORT: String(SERVER_PORT), BOTS: '0' }, reuseExistingServer: false },
     {
       command: `npx vite --port ${CLIENT_PORT} --strictPort`,
       cwd: 'client',

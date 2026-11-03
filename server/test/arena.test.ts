@@ -1,11 +1,11 @@
-import type { Room } from '@colyseus/core'
+import type { Room, StepContext } from '@colyseus/core'
 import { boot, type ColyseusTestServer } from '@colyseus/testing'
 import {
-  AFK_FRAMES, ARENA_CAPACITY, ARENA_HALF, Action, BODY_RADIUS, Btn, CHARACTER_COUNT, CloseCode, IDLE_INPUT, Msg, PROTOCOL_VERSION,
+  AFK_FRAMES, ARENA_CAPACITY, ARENA_HALF, Action, BODY_RADIUS, Btn, CHARACTER_COUNT, CloseCode, IDLE_INPUT, MAX_HP, Msg, PROTOCOL_VERSION,
   PlayerInput, ROOM_NAME, SIM_FIELDS, SPAWN_INVULN_FRAMES, TICK_RATE, VARIANT_COUNT, WALK_SPEED, assembleName, stepPlayer,
   type ElimEvent, type HitEvent, type JoinOptions, type PlayerSim, type PlayerState, type ResultMsg,
 } from '@fight-club/shared'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { server, statsCache } from '../src/app.ts'
 import { ArenaRoom } from '../src/rooms/ArenaRoom.ts'
 
@@ -65,6 +65,8 @@ describe('게임 서버', () => {
   beforeAll(async () => {
     colyseus = await boot(server)
     statsCache.ttlMs = 0
+    // 봇은 아래 '봇 (P5)'에서만 켠다 — 다른 테스트는 사람끼리만 있어야 한다
+    ArenaRoom.botFill = 0
   })
   afterAll(() => colyseus.shutdown())
   beforeEach(() => colyseus.cleanup())
@@ -511,5 +513,101 @@ describe('게임 서버', () => {
         ArenaRoom.afkFrames = AFK_FRAMES
       }
     })
+  })
+
+  describe('봇 (P5)', () => {
+    beforeEach(() => { ArenaRoom.botFill = 4 })
+    afterEach(() => {
+      ArenaRoom.botFill = 0
+      ArenaRoom.afkFrames = AFK_FRAMES
+    })
+
+    const botsIn = (room: Room) => [...(room.state as { players: Map<string, PlayerState> }).players.entries()].filter(([, p]) => p.isBot)
+
+    it('사람이 1명이면 봇 3명이 바로 들어와 모두 4명이 된다. 봇은 isBot(🤖)·겹치지 않는 이름·입장 무적이 있다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      await join(room)
+      const bots = botsIn(room)
+      expect(bots).toHaveLength(3)
+      expect(room.state.players.size).toBe(4)
+      expect(new Set([...room.state.players.values()].map((p: PlayerState) => p.name)).size).toBe(4)
+      for (const [id, p] of bots) {
+        expect(id).toMatch(/^bot:/)
+        expect(p.invuln).toBe(SPAWN_INVULN_FRAMES)
+      }
+    })
+
+    it('사람이 들어오면 가장 최근에 넣은 봇부터 빠지고, 사람이 4명이면 봇이 없다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      await join(room)
+      const first = botsIn(room).map(([id]) => id)
+      await join(room)
+      expect(botsIn(room).map(([id]) => id)).toEqual(first.slice(0, 2))
+      await join(room)
+      expect(botsIn(room).map(([id]) => id)).toEqual(first.slice(0, 1))
+      await join(room)
+      expect(botsIn(room)).toHaveLength(0)
+      expect(room.state.players.size).toBe(4)
+    })
+
+    it('봇이 탈락하면 3초 뒤 새 봇으로 다시 채우고, 사람이 모두 나가면 봇도 빠진다', async () => {
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const client = await join(room)
+      const [victimId, victim] = botsIn(room)[0]
+      victim.y = -10
+      await waitTicks(room, 2)
+      expect(room.state.players.has(victimId)).toBe(false)
+      expect(botsIn(room)).toHaveLength(2)
+      await waitTicks(room, 3 * TICK_RATE - 10)
+      expect(botsIn(room)).toHaveLength(2)
+      await waitTicks(room, 15)
+      const refilled = botsIn(room)
+      expect(refilled).toHaveLength(3)
+      const fresh = refilled.find(([id]) => id !== victimId && !id.startsWith(victimId))!
+      expect(fresh[1].name).not.toBe('')
+      expect(refilled.map(([id]) => id)).not.toContain(victimId)
+
+      await client.leave()
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      expect(botsIn(room)).toHaveLength(0)
+    }, 10_000)
+
+    it('사람 1명과 봇 3명이 5분 동안 싸워도 봇은 스스로 떨어지지 않는다 (자멸 0)', async () => {
+      ArenaRoom.afkFrames = Infinity
+      const room = await colyseus.createRoom(ROOM_NAME)
+      const client = await join(room)
+      const human = room.state.players.get(client.sessionId)!
+      // 브로드캐스트를 엿들어 탈락·명중을 센다
+      const elims: ElimEvent[] = []
+      const hits: HitEvent[] = []
+      const broadcast = room.broadcast.bind(room)
+      room.broadcast = ((type: string, message?: unknown, options?: unknown) => {
+        if (type === Msg.Elim) elims.push(message as ElimEvent)
+        if (type === Msg.Hit) hits.push(message as HitEvent)
+        return (broadcast as (t: string, m?: unknown, o?: unknown) => void)(type, message, options)
+      }) as typeof room.broadcast
+      // 실제 시간을 기다리지 않고 틱을 직접 돌린다 (5분 = 18,000틱)
+      const step = (room as unknown as { update(ctx: StepContext): void }).update.bind(room)
+      const dtMs = 1000 / TICK_RATE
+      let tick = room.state.tick
+      const seen = new Set<string>()
+      for (let i = 0; i < 5 * 60 * TICK_RATE; i++) {
+        tick++
+        step({ tick, dt: DT, dtMs, subSteps: 1, subDt: DT, subDtMs: dtMs })
+        for (const [id] of botsIn(room)) seen.add(id)
+        // 사람은 버티게만 둔다: 체력을 채우고 경기장 안쪽에 세운다 (봇이 스스로 떨어지는지만 본다)
+        human.hp = MAX_HP
+        if (Math.abs(human.x) > ARENA_HALF - 1 || Math.abs(human.z) > ARENA_HALF - 1 || human.y < 0) place(human, 0, 0)
+      }
+      const botElims = elims.filter((e) => e.victim.startsWith('bot:'))
+      const causes = botElims.reduce<Record<string, number>>((acc, e) => ({ ...acc, [e.cause]: (acc[e.cause] ?? 0) + 1 }), {})
+      expect(botElims.filter((e) => e.cause === 'selfout')).toEqual([])
+      // 실제로 싸웠다: 봇이 사람을 여러 번 때렸고, 봇끼리 탈락시키기도 했으며, 빈자리는 다시 채워졌다
+      const onHuman = hits.filter((h) => h.victim === client.sessionId && h.attacker.startsWith('bot:'))
+      expect(onHuman.length, JSON.stringify(causes)).toBeGreaterThan(100)
+      expect(botElims.length, JSON.stringify(causes)).toBeGreaterThan(0)
+      expect(seen.size).toBeGreaterThan(3)
+      console.log(`봇 5분: 사람을 ${onHuman.length}번 때림, 봇 탈락 ${JSON.stringify(causes)}, 들어온 봇 ${seen.size}명`)
+    }, 60_000)
   })
 })

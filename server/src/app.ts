@@ -25,6 +25,8 @@ function trackLatency(ms: number) {
 
 // 서버 시작 시 COLYSEUS_LATENCY로 준 지연은 Colyseus가 직접 적용한다
 trackLatency(Number(process.env.COLYSEUS_LATENCY) || 0)
+// 봇 끄기 (E2E·자동 점검처럼 혼자 있어야 하는 경우): BOTS=0
+if (process.env.BOTS === '0') ArenaRoom.botFill = 0
 
 export const server = defineServer({
   rooms: {
