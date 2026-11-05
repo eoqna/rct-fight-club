@@ -76,10 +76,12 @@ deploy/local.sh down   # 내리고 지운다
    npm run loadtest -- --url https://<SITE> --admin <ADMIN_PASSWORD> --players 192 --seconds 300
    ```
    5초마다 연결 수·1인당 받는 양·서버 지표를 찍고, 끝나면 목표와 비교해 ✅/❌를 보여 준다.
-3. **Lightsail의 CPU는 버스트형**이다 — 짧게는 높게 쓸 수 있지만, 요금제마다 정해진 '지속 가능' 사용률보다 오래 높게 쓰면 느려진다. 콘솔의 인스턴스 → Metrics → CPU utilization에서 지속 가능 영역(sustainable zone)을 넘는지 함께 본다. 넘으면 한 단계 큰 요금제로 바꾼다 (스냅숏 → 새 인스턴스, 고정 IP를 옮겨 붙이면 주소는 그대로).
+3. **Lightsail의 CPU는 버스트형**이다 — 짧게는 높게 쓸 수 있지만, 요금제마다 정해진 '지속 가능' 사용률보다 오래 높게 쓰면 느려진다. 콘솔의 인스턴스 → Metrics → CPU utilization에서 지속 가능 영역(sustainable zone)을 넘는지 함께 본다. 넘으면 기준선이 높은 요금제로 바꾼다 (스냅숏 → 새 인스턴스, 고정 IP를 옮겨 붙이면 주소는 그대로). 기준선은 vCPU마다 $7 10% · $12·$24 20% · $44 30% · $84(4 vCPU) 40%다 — $24는 메모리만 크고 CPU 기준선은 $12와 같다 ([AWS 표](https://docs.aws.amazon.com/lightsail/latest/userguide/baseline-cpu-performance.html)).
 4. 끝나면 `IP_LIMIT_EXEMPT`를 지우고 다시 반영한다.
 
 이 컴퓨터(M3 Pro)에서 잰 기준값: 192명·경기장 12개에서 틱 처리 p95 0.12ms, 서버 CPU 평균 32%, 한 사람이 받는 양 약 8KB/s (design §9).
+
+Lightsail $12(2 vCPU·2GB)에서 잰 값 (2026-11-05, 192명·경기장 12개·5분, 실패 0): 틱 처리 p95 0.31ms ✅, 게임 서버 CPU 평균 93.5% ❌, Caddy 약 56%. 서버 전체로 코어 약 1.5개(vmstat 77%, 그중 커널 44% — 작은 메시지가 많다: 한 사람이 입력 60번·패치 30번/초)를 써서 기준선(코어 0.4개)을 크게 넘는다. 한 사람에 코어 약 0.8%(게임 서버+Caddy)이므로 **기준선 안에서 계속 받을 수 있는 동시 접속은 약 45명**이고, 그 이상은 모아 둔 버스트로 버틴다. 전송량은 CPU보다 한참 뒤에 걸린다 (월 3TB ≈ 평균 동시 접속 100명 이상).
 
 ## 보안 메모
 
