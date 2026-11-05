@@ -15,12 +15,13 @@
 
 ## 처음 한 번
 
-1. **Lightsail 인스턴스 만들기** — 리전 서울(ap-northeast-2), Linux/Unix → OS Only → **Ubuntu 24.04 LTS**, 요금제는 2 vCPU·메모리 2GB 이상(부하 시험 결과를 보고 정한다, 아래 '부하 시험'), SSH 키 페어(기본 키를 내려받아 둔다).
+1. **Lightsail 인스턴스 만들기** — 리전 서울(ap-northeast-2), Linux 운영 체제(예전 화면: Linux/Unix → OS Only) → **Ubuntu 24.04 LTS**, 요금제는 2 vCPU·메모리 2GB 이상(부하 시험 결과를 보고 정한다, 아래 '부하 시험'), SSH 키 페어(기본 키를 내려받아 둔다).
+   - 2026년 10월부터 바뀐 가입 방식(AWS Settings·프로젝트)으로 만든 계정은 리전이 연락처의 나라로 정해지고(한국 → 시드니) 리전 메뉴가 없다. 서울을 쓰려면 ① 유료 플랜으로 업그레이드 → ② 고급 기능 활성화 → ③ 조직 정책(SCP)의 `RegionFloor`에 `ap-northeast-2`를 추가한다 ([AWS 안내](https://docs.aws.amazon.com/accounts/latest/reference/activate-advanced-features.html)). ①·②는 되돌릴 수 없고 ②를 하면 지출 한도가 없어진다 — 예산 알림(Budgets)을 걸어 둔다. 남은 크레딧은 그대로 사용료에 먼저 쓰인다.
 2. **고정 IP** — Networking → Create static IP → 이 인스턴스에 붙인다 (붙어 있는 동안 무료).
 3. **방화벽** — 인스턴스 → Networking → IPv4 Firewall: SSH(22)·HTTP(80)는 기본으로 열려 있다. **HTTPS(443, TCP)를 추가**한다. (선택) UDP 443을 열면 HTTP/3도 쓴다. IPv6 방화벽에도 같은 규칙.
 4. **무료 도메인** (공개 전에 정식 도메인으로 바꾼다)
    - DuckDNS: https://www.duckdns.org 에 로그인 → 하위 도메인 만들기(예: `fightclub` → `fightclub.duckdns.org`) → current ip에 고정 IP를 넣고 update ip.
-   - 또는 가입 없이: `<고정 IP의 점을 -로>.sslip.io` (예: 고정 IP가 3.38.12.34면 `3-38-12-34.sslip.io`).
+   - 또는 가입 없이: `<고정 IP의 점을 -로>.sslip.io` (예: 고정 IP가 3.38.12.34면 `3-38-12-34.sslip.io`). 단 sslip.io는 공개 접미사 목록(Public Suffix List)에 없어서 Let's Encrypt 발급 한도(같은 도메인에 주 50장)를 전 세계 사용자와 함께 쓴다 — 인증서를 못 받을 수 있으니 DuckDNS를 먼저 쓴다.
 5. **서버 준비** (이 컴퓨터에서)
    ```sh
    KEY=~/Downloads/LightsailDefaultKey-ap-northeast-2.pem   # 내려받은 키

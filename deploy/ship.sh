@@ -29,7 +29,7 @@ $SSH "$TARGET" "set -e
   RELEASE=$RELEASE docker compose --env-file ../../.env up -d --remove-orphans
   echo $RELEASE > ../../current
   RELEASE=$RELEASE docker compose --env-file ../../.env ps
-  # 오래된 릴리스와 그 이미지는 지운다 (최근 $KEEP개만 남긴다)
+  # 오래된 릴리스와 그 이미지는 지운다 (최근 ${KEEP}개만 남긴다)
   cd ..
   for old in \$(ls -1t | tail -n +$((KEEP + 1))); do
     docker image rm -f fight-club-server:\$old fight-club-web:\$old >/dev/null 2>&1 || true
